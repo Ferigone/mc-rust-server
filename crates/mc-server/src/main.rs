@@ -90,16 +90,28 @@ fn main() -> Result<()> {
     };
     let plains = data.dynamic_id("minecraft:worldgen/biome", "minecraft:plains").unwrap() as u16;
     let layers = [st("minecraft:bedrock") as u16, st("minecraft:dirt") as u16, st("minecraft:dirt") as u16, st("minecraft:grass_block") as u16];
-    let world = world::World::flat(dim, palette, &layers, plains);
+    let seed = config::parse_seed(&settings.level_seed);
+    let world = world::World::flat(dim, palette, &layers, plains, seed);
 
     let ids = game::Ids {
         dimension_type: data.dynamic_id("minecraft:dimension_type", "minecraft:overworld").unwrap(),
         player_entity_type: data.registry_id("minecraft:entity_type", "minecraft:player").unwrap(),
         chat_type: data.dynamic_id("minecraft:chat_type", "minecraft:chat").unwrap(),
         overworld: "minecraft:overworld",
+        attr_movement_speed: data.registry_id("minecraft:attribute", "minecraft:generic.movement_speed").unwrap(),
+        attr_entity_range: data.registry_id("minecraft:attribute", "minecraft:player.entity_interaction_range").unwrap(),
+        attr_block_range: data.registry_id("minecraft:attribute", "minecraft:player.block_interaction_range").unwrap(),
     };
 
-    let favicon = std::fs::read("server-icon.png").ok().map(|b| format!("data:image/png;base64,{}", base64(&b)));
+    // Ikona serwera: vanilla wymaga PNG 64x64 (inaczej ją pomija). Uwaga: vanilla koduje PNG ponownie przez
+    // ImageIO, my wysyłamy plik bez zmian — obraz identyczny, bajty base64 mogą się różnić.
+    let favicon = std::fs::read("server-icon.png").ok().and_then(|b| {
+        let ok = b.len() > 24 && &b[..8] == b"\x89PNG\r\n\x1a\n" && u32::from_be_bytes(b[16..20].try_into().unwrap()) == 64 && u32::from_be_bytes(b[20..24].try_into().unwrap()) == 64;
+        if !ok {
+            tracing::warn!("server-icon.png musi być obrazem PNG 64x64 — pomijam");
+        }
+        ok.then(|| format!("data:image/png;base64,{}", base64(&b)))
+    });
     let rsa = if settings.online_mode {
         info!("Generowanie klucza RSA (online-mode)");
         Some(auth::ServerKey::generate()?)

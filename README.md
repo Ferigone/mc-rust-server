@@ -6,7 +6,7 @@ z serwerem vanilla, tak by zwykły klient Java 1.21 łączył się bez modyfikac
 > **Stan: kamień milowy 1 z ok. 12 (patrz [docs/ROADMAP.md](docs/ROADMAP.md)).** To fundament, nie kompletny port.
 > Vanilla to ~4 000 klas i ~470 000 linii kodu; poniżej opisano dokładnie, co już działa i jest zweryfikowane,
 > a czego jeszcze nie ma. Nie testowano z prawdziwym klientem Minecrafta (w środowisku budowy go nie ma) —
-> wyłącznie z oryginalnymi dekoderami Mojang (patrz „Weryfikacja").
+> tylko z oryginalnymi dekoderami Mojang i w teście różnicowym z prawdziwym serwerem vanilla (patrz niżej).
 
 ## Co działa
 
@@ -33,7 +33,7 @@ rozpisane w [docs/ROADMAP.md](docs/ROADMAP.md).
 
 * `enforce-secure-profile` jest ignorowane (zawsze „false"): czat jest niepodpisany.
 * W trybie przetrwania łamanie bloku po `STOP_DESTROY_BLOCK` jest przyjmowane bez weryfikacji czasu kopania.
-* Postawiony blok dostaje stan domyślny (bez `getStateForPlacement`), przedmiot → blok po nazwie.
+* Postawiony blok dostaje stan domyślny (bez `getStateForPlacement`), przedmiot → blok po nazwie; kolizja z graczem liczona jak z pełną kostką.
 * Brak walidacji prędkości ruchu (anty-cheat) poza odrzuceniem NaN/nieskończoności/wartości poza światem.
 * Brak trwałości: po restarcie świat i ekwipunki są puste; spawn stały (0.5, −60, 0.5).
 * Brand serwera to `vanilla`.
@@ -52,8 +52,8 @@ mkdir -p run && ./target/release/mc-server --dir run   # utworzy run/server.prop
 Dla trybu offline ustaw w `run/server.properties`: `online-mode=false`.
 
 **Pliki Mojang nie są w repozytorium** (`reference/` jest w `.gitignore`): skrypty pobierają je z serwerów Mojang
-na maszynę użytkownika. Uruchamianie oryginalnego serwera wymaga zaakceptowania EULA Mojang — narzędzia tego repo
-**nie** uruchamiają serwera vanilla i niczego nie akceptują w Twoim imieniu.
+na maszynę użytkownika. Uruchamianie oryginalnego serwera wymaga zaakceptowania EULA Mojang — jedynie `tools/vanilla_compare.sh` go uruchamia
+i robi to wyłącznie przy jawnym `MC_EULA_ACCEPTED=true`; żadne narzędzie niczego nie akceptuje w Twoim imieniu.
 
 ## Narzędzia REA (inżynieria odwrotna)
 
@@ -64,6 +64,8 @@ na maszynę użytkownika. Uruchamianie oryginalnego serwera wymaga zaakceptowani
 | `tools/gen_packet_ids.py` | Generuje `crates/mc-protocol/src/ids.rs` z raportu `packets.json` — **żadne ID pakietu nie jest wpisane ręcznie**. |
 | `tools/verify.sh` | Przepuszcza zrzut pakietów serwera Rust przez **prawdziwe** kodeki Mojang (patrz niżej). |
 | `tools/e2e.sh` | Uruchamia serwer, boty i całą weryfikację jednym poleceniem. |
+| `tools/vanilla_compare.sh` | Test różnicowy z prawdziwym serwerem vanilla (wymaga `MC_EULA_ACCEPTED=true`). |
+| `tools/cmp_dumps.py`, `tools/cmp_chunk.py` | Porównanie zrzutów pakietów / rozbiór chunka część po części. |
 
 Układ pól każdego pakietu został odtworzony ze zdekompilowanego kodu (`net.minecraft.network.protocol.*`),
 a nie z pamięci; to samo dotyczy sekwencji dołączania (`PlayerList.placeNewPlayer`), konfiguracji
@@ -86,6 +88,34 @@ Dodatkowo: testy jednostkowe (`cargo test --workspace`) z wektorami potwierdzony
 (UUID offline, `BlockPos.asLong`, liczby chunków `ChunkTrackingView`) oraz test obciążeniowy: 100 równoległych botów
 (po ~110 chunków każdy) — wszystkie zaliczyły wszystkie sprawdzenia; serwer zużył ok. 3 s CPU i ~114 MiB RAM
 w szczycie (build release, 4 rdzenie; świat superflat, więc to nie jest porównanie z generowaniem terenu).
+
+## Test różnicowy z prawdziwym serwerem vanilla
+
+`MC_EULA_ACCEPTED=true tools/vanilla_compare.sh` uruchamia **oryginalny serwer vanilla 1.21.1** obok serwera Rust
+(ten sam seed, tryb kreatywny, płaski świat, offline), wykonuje te same zdarzenia botem i porównuje pakiety.
+Skrypt zapisze `eula=true` tylko przy jawnej zmiennej `MC_EULA_ACCEPTED=true` (zgoda właściciela na EULA Mojang).
+Ostatni wynik: **36 / 36 zgodnych**:
+
+* **Bajt w bajt identyczne:** status JSON (kolejność kluczy zmierzona na vanilla), kompresja, `game_profile`, brand,
+  feature flags, known packs, **wszystkie 11 pakietów `registry_data`**, `finish_configuration`, trudność, uprawnienia,
+  wybrany slot, `server_data`, `player_info_update` (w tym pusty pakiet), granica świata, spawn, `game_event`,
+  `ticking_state/step`, zawartość ekwipunku, zdrowie, doświadczenie, **wszystkie chunki** (heightmapy, sekcje wraz z kolejnością
+  palety, maski i tablice światła — 109/109), czat, komunikat o nieznanej komendzie (z kontekstem `<--[HERE]`), `/list`,
+  odrzucenie klienta ze złym protokołem (obie gałęzie komunikatu).
+* **Identyczne po zamaskowaniu pól losowych/zależnych od sesji:** `login` (ID encji, kolejność wymiarów z `HashSet`),
+  `entity_event`, metadane własne gracza, `player_position` (pozycja startowa jest losowa w promieniu `spawnRadius`).
+* **Zachowanie świata:** łamanie bloku, stawianie bloku (udane i odrzucone przez kolizję z graczem), kilka zmian w jednej
+  sekcji (`section_blocks_update`) — te same pakiety w tej samej kolejności co w vanilla: echo slotu, dwa jawne
+  `block_update`, rozgłoszenie zmiany, potwierdzenie sekwencji na początku ticka.
+
+Różnice zmierzone testem, które **nie** są jeszcze usunięte: `update_recipes` (ok. 108 KB w vanilla, u nas pusty),
+`commands` (drzewo komend), `recipe` (książka receptur), `update_advancements`, moby i pozostałe encje, `update_tags`
+(ta sama zawartość ID co w vanilla — sprawdzone `tools/verify.sh` — ale inna kolejność zapisu z `HashMap`),
+losowe mechaniki (np. trawa przykryta kamieniem zamienia się w ziemię przy losowym ticku).
+
+Test ujawnił i naprawił m.in.: kolejność kluczy NBT (emulacja iteracji `java.util.HashMap`), strukturę komunikatów błędów komend,
+liczby zamiast tekstów w `/list`, obcinanie warstw światła (vanilla trzyma je tylko do sekcji nad najwyższą niepustą),
+kolejność palety w sekcji, hashed seed (SHA-256), listę wymiarów, `ticking_*`, atrybuty gracza, stałą granicy świata.
 
 ## Architektura
 

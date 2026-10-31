@@ -172,10 +172,15 @@ async fn handle(stream: TcpStream, addr: SocketAddr, shared: Arc<Shared>) -> Res
 
 // ------------------------------------------------------------------- status
 
+/// Kolejność kluczy zmierzona na prawdziwym serwerze 1.21.1: version, favicon, description, players.
 fn status_json(shared: &Shared) -> String {
     use serde_json::{json, Map, Value};
     let s = &shared.settings;
     let mut m = Map::new();
+    m.insert("version".into(), json!({"name": VERSION_NAME, "protocol": ids::PROTOCOL_VERSION}));
+    if let Some(f) = &shared.favicon {
+        m.insert("favicon".into(), Value::String(f.clone()));
+    }
     m.insert("description".into(), Text::plain(&s.motd).to_json());
     let mut players = Map::new();
     players.insert("max".into(), json!(s.max_players));
@@ -188,11 +193,8 @@ fn status_json(shared: &Shared) -> String {
         }
     }
     m.insert("players".into(), Value::Object(players));
-    m.insert("version".into(), json!({"name": VERSION_NAME, "protocol": ids::PROTOCOL_VERSION}));
-    if let Some(f) = &shared.favicon {
-        m.insert("favicon".into(), Value::String(f.clone()));
-    }
-    // `enforcesSecureChat` ma wartość domyślną false i jest pomijane przy false (kodek vanilla)
+    // `enforcesSecureChat` ma wartość domyślną false i jest pomijane przy false (kodek vanilla);
+    // ten port nie wymusza bezpiecznego czatu, więc go nie ogłasza.
     if ENFORCES_SECURE_CHAT {
         m.insert("enforcesSecureChat".into(), Value::Bool(true));
     }

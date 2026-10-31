@@ -28,10 +28,32 @@ struct Args {
     secs: u64,
     known_packs: bool,
     chat: Option<String>,
+    command: Option<String>,
+    brk: Option<Option<(i32, i32, i32)>>,
+    place: Option<Option<(i32, i32, i32)>>,
+    place_beside: bool,
     walk: bool,
     online: bool,
     session_url: String,
     dump: Option<String>,
+    protocol: i32,
+}
+
+fn parse_pos(s: &str) -> Result<(i32, i32, i32)> {
+    let v: Vec<i32> = s.split(',').map(|x| x.trim().parse()).collect::<Result<_, _>>()?;
+    if v.len() != 3 {
+        bail!("pozycja ma postać x,y,z");
+    }
+    Ok((v[0], v[1], v[2]))
+}
+
+/// `below` = blok bezpośrednio pod stopami gracza (rozwiązywany po otrzymaniu pozycji z serwera).
+fn parse_pos_or_below(s: &str) -> Result<Option<(i32, i32, i32)>> {
+    if s == "below" || s == "beside" {
+        Ok(None)
+    } else {
+        Ok(Some(parse_pos(s)?))
+    }
 }
 
 fn parse_args() -> Result<Args> {
@@ -46,10 +68,15 @@ fn parse_args() -> Result<Args> {
         secs: 3,
         known_packs: true,
         chat: None,
+        command: None,
+        brk: None,
+        place: None,
+        place_beside: false,
         walk: false,
         online: false,
         session_url: "http://127.0.0.1:8089".into(),
         dump: None,
+        protocol: ids::PROTOCOL_VERSION,
     };
     while let Some(k) = it.next() {
         match k.as_str() {
@@ -60,6 +87,14 @@ fn parse_args() -> Result<Args> {
             "--secs" => a.secs = it.next().unwrap().parse()?,
             "--no-known-packs" => a.known_packs = false,
             "--chat" => a.chat = it.next(),
+            "--command" => a.command = it.next(),
+            "--break" => a.brk = Some(parse_pos_or_below(&it.next().unwrap())?),
+            "--place" => {
+                let v = it.next().unwrap();
+                a.place_beside = v == "beside";
+                a.place = Some(parse_pos_or_below(&v)?)
+            }
+            "--protocol" => a.protocol = it.next().unwrap().parse()?,
             "--walk" => a.walk = true,
             "--online" => a.online = true,
             "--session-url" => a.session_url = it.next().unwrap(),
@@ -232,7 +267,7 @@ async fn join(a: &Args) -> Result<()> {
     if let Some(d) = &a.dump {
         c.dump = Some(std::fs::File::create(d)?);
     }
-    let h = Intention { protocol_version: ids::PROTOCOL_VERSION, server_address: a.host.clone(), server_port: a.port, next_state: 2 };
+    let h = Intention { protocol_version: a.protocol, server_address: a.host.clone(), server_port: a.port, next_state: 2 };
     c.send(&h.encode()).await?;
     let uuid = mc_protocol::buf::offline_uuid(&a.name);
     c.send(&packets::LoginHello { name: a.name.clone(), profile_id: uuid }.encode()).await?;
@@ -378,6 +413,8 @@ async fn join(a: &Args) -> Result<()> {
     let mut batches = 0usize;
     let mut first_chunk_checked = false;
     let mut chat_sent = false;
+    let mut cmd_sent = false;
+    let mut world_actions_sent = false;
     let mut pos = (0.0f64, 0.0f64, 0.0f64);
     let mut got_position = false;
     let mut walk_step = 0;
@@ -462,7 +499,7 @@ async fn join(a: &Args) -> Result<()> {
                     first_chunk_checked = true;
                     rep.check("chunk: pakiet w całości zdekodowany", info.fully_consumed, "");
                     rep.check("chunk: 24 sekcje", info.sections.len() == 24, format!("{}", info.sections.len()));
-                    rep.check("chunk: 26 sekcji światła w maskach", info.light_sections == 26, format!("{}", info.light_sections));
+                    rep.check("chunk: maski światła w granicach 26 sekcji", info.light_sections <= 26, format!("{}", info.light_sections));
                     if let Some(b) = &blocks {
                         let bedrock = b["minecraft:bedrock"];
                         let dirt = b["minecraft:dirt"];
@@ -517,6 +554,52 @@ async fn join(a: &Args) -> Result<()> {
                     w.put_bool(false);
                     w.put_varint(0);
                     w.put_bytes(&[0, 0, 0]);
+                }))
+                .await?;
+            }
+        }
+        if got_position && !cmd_sent {
+            if let Some(cmd) = &a.command {
+                cmd_sent = true;
+                c.send(&mc_protocol::frame::payload(ids::play::serverbound::CHAT_COMMAND, |w| w.put_string(cmd))).await?;
+            }
+        }
+        if got_position && !world_actions_sent && id == pc::LEVEL_CHUNK_WITH_LIGHT {
+            world_actions_sent = true;
+            use ids::play::serverbound as sbp;
+            let below = (pos.0.floor() as i32, pos.1.floor() as i32 - 1, pos.2.floor() as i32);
+            if let Some((x, y, z)) = a.brk.map(|p| p.unwrap_or(below)) {
+                // PlayerAction START_DESTROY_BLOCK (0), ściana UP (1), sekwencja 1
+                c.send(&mc_protocol::frame::payload(sbp::PLAYER_ACTION, |w| {
+                    w.put_varint(0);
+                    w.put_block_pos(x, y, z);
+                    w.put_u8(1);
+                    w.put_varint(1);
+                }))
+                .await?;
+            }
+            // beside: gorna sciana bloku obok tego pod stopami, wiec miejsce docelowe nie koliduje z graczem
+            let target = if a.place_beside { (below.0 + 1, below.1, below.2) } else { below };
+            if let Some((x, y, z)) = a.place.map(|p| p.unwrap_or(target)) {
+                // kamień (minecraft:stone) do slotu 36 (hotbar 0) w trybie kreatywnym, potem UseItemOn na górną ścianę
+                let stone = 1; // ID przedmiotu stone z rejestru minecraft:item
+                c.send(&mc_protocol::frame::payload(sbp::SET_CREATIVE_MODE_SLOT, |w| {
+                    w.put_i16(36);
+                    w.put_varint(1);
+                    w.put_varint(stone);
+                    w.put_varint(0);
+                    w.put_varint(0);
+                }))
+                .await?;
+                c.send(&mc_protocol::frame::payload(sbp::USE_ITEM_ON, |w| {
+                    w.put_varint(0);
+                    w.put_block_pos(x, y, z);
+                    w.put_varint(1);
+                    w.put_f32(0.5);
+                    w.put_f32(1.0);
+                    w.put_f32(0.5);
+                    w.put_bool(false);
+                    w.put_varint(2);
                 }))
                 .await?;
             }

@@ -207,3 +207,32 @@ impl Settings {
         }
     }
 }
+
+/// `WorldOptions.parseSeed`: puste -> losowe; liczba całkowita -> ta liczba; inaczej `String.hashCode()`.
+pub fn parse_seed(s: &str) -> i64 {
+    let t = s.trim();
+    if t.is_empty() {
+        use rand::Rng;
+        return rand::thread_rng().r#gen();
+    }
+    match t.parse::<i64>() {
+        Ok(v) => v,
+        Err(_) => java_string_hash(t) as i64,
+    }
+}
+
+pub use mc_protocol::nbt::java_string_hash;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn seeds_like_java() {
+        assert_eq!(parse_seed("12345"), 12345);
+        assert_eq!(parse_seed("-9876543210"), -9876543210);
+        // "hello".hashCode() == 99162322 w Javie
+        assert_eq!(java_string_hash("hello"), 99162322);
+        assert_eq!(parse_seed("hello"), 99162322);
+    }
+}

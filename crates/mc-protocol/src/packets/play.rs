@@ -266,8 +266,8 @@ pub struct Border {
 }
 impl Default for Border {
     fn default() -> Self {
-        // WorldBorder.MAX_SIZE = 5.999997E7, absoluteMaxSize = 29999984, ostrzeżenia 5 bloków / 15 s
-        Self { center_x: 0.0, center_z: 0.0, old_size: 5.999997E7, new_size: 5.999997E7, lerp_time: 0, absolute_max_size: 29999984, warning_blocks: 5, warning_time: 15 }
+        // WorldBorder.MAX_SIZE = 5.9999968E7, absoluteMaxSize = 29999984, ostrzeżenia 5 bloków / 15 s
+        Self { center_x: 0.0, center_z: 0.0, old_size: 5.9999968E7, new_size: 5.9999968E7, lerp_time: 0, absolute_max_size: 29999984, warning_blocks: 5, warning_time: 15 }
     }
 }
 pub fn initialize_border(b: &Border) -> Vec<u8> {
@@ -280,6 +280,33 @@ pub fn initialize_border(b: &Border) -> Vec<u8> {
         w.put_varint(b.absolute_max_size);
         w.put_varint(b.warning_blocks);
         w.put_varint(b.warning_time);
+    })
+}
+
+/// `ClientboundTickingStatePacket` (częstotliwość ticków + zamrożenie).
+pub fn ticking_state(tick_rate: f32, frozen: bool) -> Vec<u8> {
+    payload(cb::TICKING_STATE, |w| {
+        w.put_f32(tick_rate);
+        w.put_bool(frozen);
+    })
+}
+pub fn ticking_step(steps: i32) -> Vec<u8> {
+    payload(cb::TICKING_STEP, |w| w.put_varint(steps))
+}
+/// Ogranicznik paczki (`ClientboundBundlePacket` = delimiter, pakiety, delimiter).
+pub fn bundle_delimiter() -> Vec<u8> {
+    payload(cb::BUNDLE_DELIMITER, |_| {})
+}
+/// `ClientboundUpdateAttributesPacket` bez modyfikatorów: (id atrybutu w rejestrze, wartość bazowa).
+pub fn update_attributes(entity_id: i32, attributes: &[(i32, f64)]) -> Vec<u8> {
+    payload(cb::UPDATE_ATTRIBUTES, |w| {
+        w.put_varint(entity_id);
+        w.put_varint(attributes.len() as i32);
+        for (id, base) in attributes {
+            w.put_varint(*id);
+            w.put_f64(*base);
+            w.put_varint(0); // brak modyfikatorów
+        }
     })
 }
 
@@ -522,6 +549,41 @@ pub fn set_experience(progress: f32, level: i32, total: i32) -> Vec<u8> {
         w.put_f32(progress);
         w.put_varint(level);
         w.put_varint(total);
+    })
+}
+
+/// `ItemStack.OPTIONAL_STREAM_CODEC` bez komponentów: count, id, 0 dodanych, 0 usuniętych (puste = VarInt 0).
+pub fn put_item_stack(w: &mut Vec<u8>, item: Option<(i32, i32)>) {
+    match item {
+        Some((id, count)) if count > 0 => {
+            w.put_varint(count);
+            w.put_varint(id);
+            w.put_varint(0);
+            w.put_varint(0);
+        }
+        _ => w.put_varint(0),
+    }
+}
+
+/// `ClientboundContainerSetSlotPacket`.
+pub fn container_set_slot(container_id: u8, state_id: i32, slot: i16, item: Option<(i32, i32)>) -> Vec<u8> {
+    payload(cb::CONTAINER_SET_SLOT, |w| {
+        w.put_u8(container_id);
+        w.put_varint(state_id);
+        w.put_i16(slot);
+        put_item_stack(w, item);
+    })
+}
+
+/// `ClientboundSectionBlocksUpdatePacket`: pozycja sekcji + wpisy `(stan << 12) | (x<<8 | z<<4 | y)`.
+pub fn section_blocks_update(sx: i32, sy: i32, sz: i32, changes: &[(u16, u32)]) -> Vec<u8> {
+    payload(cb::SECTION_BLOCKS_UPDATE, |w| {
+        let pos = (((sx as i64) & 0x3FFFFF) << 42) | ((sy as i64) & 0xFFFFF) | (((sz as i64) & 0x3FFFFF) << 20);
+        w.put_i64(pos);
+        w.put_varint(changes.len() as i32);
+        for (local, state) in changes {
+            w.put_varlong(((*state as i64) << 12) | *local as i64);
+        }
     })
 }
 

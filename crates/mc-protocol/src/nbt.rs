@@ -46,6 +46,43 @@ impl Compound {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
+
+    /// Kolejność zapisu kluczy jak w `CompoundTag` Mojang, który trzyma wpisy w `java.util.HashMap`:
+    /// indeks koszyka = `(h ^ (h >>> 16)) & (n - 1)`, `h = String.hashCode()`, `n` = potęga dwójki >= 16
+    /// z rozmiarem <= 0.75·n; w obrębie koszyka zachowana jest kolejność wstawiania.
+    pub fn java_order(&self) -> Vec<usize> {
+        let len = self.0.len();
+        let mut idx: Vec<usize> = (0..len).collect();
+        if len < 2 {
+            return idx;
+        }
+        let mut n = 16usize;
+        while len > n * 3 / 4 {
+            n *= 2;
+        }
+        let bucket = |k: &str| {
+            let h = java_string_hash(k) as u32;
+            ((h ^ (h >> 16)) as usize) & (n - 1)
+        };
+        idx.sort_by_key(|&i| bucket(&self.0[i].0)); // sort_by_key jest stabilny
+        idx
+    }
+}
+
+/// `java.lang.String.hashCode()` po jednostkach UTF-16.
+pub fn java_string_hash(s: &str) -> i32 {
+    s.encode_utf16().fold(0i32, |h, u| h.wrapping_mul(31).wrapping_add(u as i32))
+}
+
+/// Jednorodność listy jak w `NbtOps`: gdy typy elementów się różnią, każdy element niebędący
+/// compoundem jest opakowany w `{"": wartość}`.
+pub fn unify_list(items: Vec<Tag>) -> Vec<Tag> {
+    let Some(first) = items.first() else { return items };
+    let id = first.id();
+    if items.iter().all(|t| t.id() == id) {
+        return items;
+    }
+    items.into_iter().map(|t| if matches!(t, Tag::Compound(_)) { t } else { Tag::Compound(Compound::new().with("", t)) }).collect()
 }
 
 impl Tag {
@@ -108,7 +145,8 @@ impl Tag {
                 }
             }
             Tag::Compound(c) => {
-                for (k, v) in &c.0 {
+                for i in c.java_order() {
+                    let (k, v) = &c.0[i];
                     w.put_u8(v.id());
                     write_mutf8(k, w);
                     v.write_payload(w);
@@ -293,6 +331,39 @@ mod tests {
         let mut w = Vec::new();
         Tag::Compound(Compound::new()).write_network(&mut w);
         assert_eq!(w, [0x0a, 0x00]);
+    }
+
+    fn order(keys: &[&str]) -> Vec<String> {
+        let mut c = Compound::new();
+        for k in keys {
+            c.put(*k, Tag::Byte(0));
+        }
+        c.java_order().into_iter().map(|i| c.0[i].0.clone()).collect()
+    }
+
+    /// Kolejności zmierzone na prawdziwym serwerze vanilla 1.21.1 (pakiety system_chat / player_chat).
+    #[test]
+    fn java_hashmap_order_matches_vanilla_observations() {
+        assert_eq!(order(&["text", "color", "extra"]), ["color", "extra", "text"]);
+        assert_eq!(order(&["text", "color", "extra", "clickEvent"]), ["clickEvent", "color", "extra", "text"]);
+        assert_eq!(order(&["text", "color", "underlined"]), ["color", "underlined", "text"]);
+        assert_eq!(order(&["translate", "color", "italic"]), ["color", "italic", "translate"]);
+        assert_eq!(order(&["text", "clickEvent", "hoverEvent", "insertion"]), ["hoverEvent", "clickEvent", "insertion", "text"]);
+        assert_eq!(order(&["type", "id", "name"]), ["name", "id", "type"]);
+        assert_eq!(order(&["action", "contents"]), ["contents", "action"]);
+        assert_eq!(order(&["action", "value"]), ["action", "value"]);
+        assert_eq!(order(&["translate", "with"]), ["with", "translate"]); // bajty /list z vanilla zaczynają się od `with`
+        // heightmapy w pakiecie chunka: MOTION_BLOCKING, WORLD_SURFACE (bajty identyczne z vanilla)
+        assert_eq!(order(&["WORLD_SURFACE", "MOTION_BLOCKING"]), ["MOTION_BLOCKING", "WORLD_SURFACE"]);
+    }
+
+    #[test]
+    fn mixed_list_is_wrapped_like_nbtops() {
+        let v = unify_list(vec![Tag::Int(1), Tag::Compound(Compound::new().with("text", Tag::string("x")))]);
+        assert_eq!(v[0], Tag::Compound(Compound::new().with("", Tag::Int(1))));
+        assert!(matches!(v[1], Tag::Compound(_)));
+        let same = unify_list(vec![Tag::Int(1), Tag::Int(2)]);
+        assert_eq!(same, vec![Tag::Int(1), Tag::Int(2)]);
     }
 
     #[test]

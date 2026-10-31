@@ -126,7 +126,9 @@ fn pack_bits(values: impl Iterator<Item = u32>, count: usize, bits: u32) -> Vec<
     out
 }
 
-fn write_container(w: &mut Vec<u8>, values: &[u16], bits_cfg: ContainerKind, global_bits: u32) {
+/// `front`: stan umieszczany na początku palety, o ile występuje. Sekcja vanilla powstaje jako paleta
+/// jednowartościowa z powietrzem, więc po dopisaniu kolejnych bloków powietrze ma indeks 0.
+fn write_container(w: &mut Vec<u8>, values: &[u16], bits_cfg: ContainerKind, global_bits: u32, front: Option<u16>) {
     let mut palette: Vec<u16> = Vec::new();
     let mut overflow = false;
     let max_pal = bits_cfg.max_indirect_entries();
@@ -151,6 +153,12 @@ fn write_container(w: &mut Vec<u8>, values: &[u16], bits_cfg: ContainerKind, glo
         let longs = pack_bits(values.iter().map(|&v| v as u32), values.len(), global_bits);
         w.put_long_array(&longs);
         return;
+    }
+    if let Some(f) = front {
+        if let Some(pos) = palette.iter().position(|&p| p == f) {
+            let v = palette.remove(pos);
+            palette.insert(0, v);
+        }
     }
     let bits = bits_cfg.indirect_bits(palette.len());
     w.put_u8(bits as u8);
@@ -205,7 +213,7 @@ fn encode_section(w: &mut Vec<u8>, s: &Section, p: &Palette) {
             w.put_varint(*v as i32);
             w.put_varint(0);
         }
-        Blocks::Full(b) => write_container(w, &b[..], ContainerKind::States, p.global_block_bits()),
+        Blocks::Full(b) => write_container(w, &b[..], ContainerKind::States, p.global_block_bits(), Some(p.air)),
     }
     // biomy: 64 komórek (4x4x4), tu jednolite
     w.put_u8(0);
@@ -265,7 +273,18 @@ fn skylight(chunk: &Chunk, dim: &Dimension, p: &Palette) -> LightData {
             top[x + z * 16] = h;
         }
     }
-    for ls in 0..n {
+    // Silnik światła vanilla trzyma warstwy tylko dla sekcji niepustych oraz ich pionowych sąsiadów:
+    // od sekcji poniżej świata do jednej nad najwyższą niepustą (zmierzone na prawdziwym serwerze 1.21.1).
+    // Wyżej klient przyjmuje pełne światło nieba bez danych.
+    let top_nonempty = (0..dim.sections()).rev().find(|&sy| {
+        let sec = &chunk.sections[sy];
+        match &sec.blocks {
+            Blocks::Uniform(v) => !p.is_air(*v),
+            Blocks::Full(b) => b.iter().any(|&v| !p.is_air(v)),
+        }
+    });
+    let active_end = top_nonempty.map_or(1, |t| t + 2).min(n - 1); // indeks sekcji światła włącznie
+    for ls in 0..=active_end {
         // ls = 0 -> sekcja poniżej świata; ls = n-1 -> powyżej
         let mut arr = [0u8; 2048];
         let mut any = false;
@@ -274,8 +293,7 @@ fn skylight(chunk: &Chunk, dim: &Dimension, p: &Palette) -> LightData {
                 let t = top[x + z * 16] as i32;
                 for ly in 0..16usize {
                     let rel_y = (ls as i32 - 1) * 16 + ly as i32; // y względem min_y
-                    let lit = rel_y >= t;
-                    if lit {
+                    if rel_y >= t {
                         let idx = (ly << 8) | (z << 4) | x;
                         arr[idx >> 1] |= 0x0F << ((idx & 1) * 4);
                         any = true;
@@ -289,7 +307,7 @@ fn skylight(chunk: &Chunk, dim: &Dimension, p: &Palette) -> LightData {
         } else {
             light.empty_sky_mask[ls / 64] |= 1 << (ls % 64);
         }
-        // brak źródeł światła blokowego
+        // brak źródeł światła blokowego: warstwa istnieje, ale jest pusta
         light.empty_block_mask[ls / 64] |= 1 << (ls % 64);
     }
     light
@@ -313,6 +331,7 @@ pub fn build_chunk_payload(chunk: &Chunk, cx: i32, cz: i32, ctx: &EncodeCtx<'_>)
 // -------------------------------------------------------------------- świat
 
 pub struct World {
+    pub seed: i64,
     pub dim: Dimension,
     pub palette: Palette,
     template: Arc<Chunk>,
@@ -322,7 +341,7 @@ pub struct World {
 
 impl World {
     /// Superflat: bedrock, 2x dirt, grass_block od `min_y` (domyślny preset vanilla), biom plains.
-    pub fn flat(dim: Dimension, palette: Palette, layers: &[u16], biome: u16) -> Self {
+    pub fn flat(dim: Dimension, palette: Palette, layers: &[u16], biome: u16, seed: i64) -> Self {
         let mut sections: Vec<Section> = (0..dim.sections()).map(|_| Section { blocks: Blocks::Uniform(palette.air), biome }).collect();
         for (i, &state) in layers.iter().enumerate() {
             let sy = i; // poniżej 16 warstw — wszystko w sekcji 0
@@ -333,7 +352,29 @@ impl World {
             }
         }
         let spawn_y = dim.min_y + layers.len() as i32;
-        Self { dim, palette, template: Arc::new(Chunk { sections, cached: None }), modified: HashMap::new(), spawn: (0, spawn_y, 0) }
+        Self { seed, dim, palette, template: Arc::new(Chunk { sections, cached: None }), modified: HashMap::new(), spawn: (0, spawn_y, 0) }
+    }
+
+    /// `BiomeManager.obfuscateSeed`: Guava `Hashing.sha256().hashLong(seed).asLong()`
+    /// (SHA-256 z 8 bajtów little-endian, pierwsze 8 bajtów jako little-endian long).
+    pub fn hashed_seed(&self) -> i64 {
+        use sha2::{Digest, Sha256};
+        let h = Sha256::digest(self.seed.to_le_bytes());
+        i64::from_le_bytes(h[..8].try_into().unwrap())
+    }
+
+    /// Najwyższy nie-powietrzny blok + 1 w kolumnie (odpowiednik `PlayerRespawnLogic.getOverworldRespawnPos`
+    /// dla świata bez płynów/liści); `None` gdy kolumna jest pusta.
+    pub fn surface_y(&self, x: i32, z: i32) -> Option<i32> {
+        let ch = self.chunk(x >> 4, z >> 4);
+        for sy in (0..self.dim.sections()).rev() {
+            for ly in (0..16usize).rev() {
+                if !self.palette.is_air(ch.sections[sy].get((x & 15) as usize, ly, (z & 15) as usize)) {
+                    return Some(self.dim.min_y + (sy * 16 + ly) as i32 + 1);
+                }
+            }
+        }
+        None
     }
 
     pub fn chunk(&self, cx: i32, cz: i32) -> &Chunk {
@@ -400,7 +441,7 @@ mod tests {
     fn heightmap_bits_for_384() {
         // Mth.ceillog2(384 + 1) = 9 -> 7 wartości na long -> 37 longów
         let dim = Dimension { min_y: -64, height: 384 };
-        let w = World::flat(dim, pal(), &[7, 10, 10, 9], 1);
+        let w = World::flat(dim, pal(), &[7, 10, 10, 9], 1, 12345);
         let hm = heightmap(w.chunk(0, 0), &dim, &pal());
         assert_eq!(hm.len(), 37);
         // wysokość 4 w każdej kolumnie: 7 wartości po 9 bitów w pierwszym longu
@@ -411,16 +452,18 @@ mod tests {
     #[test]
     fn flat_world_blocks_and_light() {
         let dim = Dimension { min_y: -64, height: 384 };
-        let w = World::flat(dim, pal(), &[7, 10, 10, 9], 1);
+        let w = World::flat(dim, pal(), &[7, 10, 10, 9], 1, 12345);
         assert_eq!(w.get_block(5, -64, 5), 7);
         assert_eq!(w.get_block(5, -61, 5), 9);
         assert_eq!(w.get_block(5, -60, 5), 0);
         assert_eq!(w.spawn, (0, -60, 0));
         let l = skylight(w.chunk(0, 0), &dim, &pal());
-        // sekcja światła 0 (pod światem) i 1 (y -64..-49, częściowo) -> 0 jest pusta, 1 ma dane
-        assert_eq!(l.empty_sky_mask[0] & 1, 1);
-        assert_eq!(l.sky_mask[0] & 0b10, 0b10);
-        assert_eq!(l.sky.len(), 25); // 26 sekcji światła - 1 pusta
+        // zgodnie z pomiarem na serwerze vanilla: sky_mask={1,2}, empty_sky={0}, empty_block={0,1,2}
+        assert_eq!(l.sky_mask[0], 0b110);
+        assert_eq!(l.empty_sky_mask[0], 0b001);
+        assert_eq!(l.block_mask[0], 0);
+        assert_eq!(l.empty_block_mask[0], 0b111);
+        assert_eq!(l.sky.len(), 2);
         // w sekcji 1 pierwsze 4 warstwy (y -64..-61) ciemne, wyższe jasne
         let arr = &l.sky[0];
         assert_eq!(arr[(3 << 8) >> 1] & 0x0F, 0); // y=3 (−61) ciemne
@@ -433,7 +476,7 @@ mod tests {
         vals[0] = 7;
         vals[1] = 9;
         let mut w = Vec::new();
-        write_container(&mut w, &vals, ContainerKind::States, 15);
+        write_container(&mut w, &vals, ContainerKind::States, 15, None);
         // 3 elementy palety -> 4 bity, paleta liniowa: bity(1) + len(1) + 3 + długość tablicy(2) + 256 longów
         assert_eq!(w[0], 4);
         assert_eq!(w[1], 3);
@@ -442,10 +485,19 @@ mod tests {
         assert_eq!(r.varint().unwrap(), 256);
     }
 
+    /// Wartość zmierzona na prawdziwym serwerze vanilla 1.21.1 (pakiet Login, pole `hashedSeed`) dla `level-seed=12345`.
+    #[test]
+    fn hashed_seed_matches_vanilla() {
+        let dim = Dimension { min_y: -64, height: 384 };
+        let w = World::flat(dim, pal(), &[7, 10, 10, 9], 1, 12345);
+        assert_eq!(w.hashed_seed(), 293737985876514017);
+        assert_eq!(w.surface_y(3, 3), Some(-60));
+    }
+
     #[test]
     fn set_block_creates_override_and_invalidates_cache() {
         let dim = Dimension { min_y: -64, height: 384 };
-        let mut w = World::flat(dim, pal(), &[7, 10, 10, 9], 1);
+        let mut w = World::flat(dim, pal(), &[7, 10, 10, 9], 1, 12345);
         let mut enc = FrameEncoder::new(None);
         let f1 = w.chunk_frame(2, 3, &mut enc);
         assert_eq!(w.set_block(33, -60, 50, 1), Some(0));

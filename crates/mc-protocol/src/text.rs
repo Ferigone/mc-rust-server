@@ -13,9 +13,19 @@ pub struct Text {
     pub extra: Vec<Text>,
     /// Dodatkowe pola stylu (np. clickEvent/hoverEvent/insertion), wyłącznie w kodowaniu NBT.
     pub style_nbt: Vec<(String, Tag)>,
+    /// Gotowy tag (np. liczba jako argument `translate`); gdy ustawiony, zastępuje resztę pól.
+    pub raw: Option<Tag>,
 }
 
 impl Text {
+    /// `Component.empty()`: pusty literał (nie jest zwijany do napisu tylko gdy ma styl lub dzieci).
+    pub fn empty() -> Self {
+        Self::plain("")
+    }
+    /// Liczba całkowita jako argument komponentu tłumaczonego (zapis NBT: `Int`).
+    pub fn int(v: i32) -> Self {
+        Self { raw: Some(Tag::Int(v)), ..Default::default() }
+    }
     pub fn plain(s: impl Into<String>) -> Self {
         Self { text: Some(s.into()), ..Default::default() }
     }
@@ -33,6 +43,9 @@ impl Text {
 
     /// Odpowiednik `Component.tryCollapseToString()`: literał bez stylu i dzieci.
     fn collapsed(&self) -> Option<&str> {
+        if self.raw.is_some() {
+            return None;
+        }
         match (&self.text, &self.translate) {
             (Some(t), None)
                 if self.with.is_empty()
@@ -50,6 +63,9 @@ impl Text {
 
     pub fn to_json(&self) -> serde_json::Value {
         use serde_json::{Map, Value};
+        if let Some(Tag::Int(v)) = &self.raw {
+            return Value::from(*v);
+        }
         if let Some(s) = self.collapsed() {
             return Value::String(s.to_owned());
         }
@@ -79,6 +95,9 @@ impl Text {
     }
 
     pub fn to_nbt(&self) -> Tag {
+        if let Some(t) = &self.raw {
+            return t.clone();
+        }
         if let Some(s) = self.collapsed() {
             return Tag::string(s);
         }
@@ -90,7 +109,7 @@ impl Text {
             c.put("translate", Tag::string(t.clone()));
         }
         if !self.with.is_empty() {
-            c.put("with", Tag::List(self.with.iter().map(Text::to_nbt).collect()));
+            c.put("with", Tag::List(crate::nbt::unify_list(self.with.iter().map(Text::to_nbt).collect())));
         }
         if let Some(col) = &self.color {
             c.put("color", Tag::string(col.clone()));
@@ -102,7 +121,7 @@ impl Text {
             c.put("italic", Tag::Byte(b as i8));
         }
         if !self.extra.is_empty() {
-            c.put("extra", Tag::List(self.extra.iter().map(Text::to_nbt).collect()));
+            c.put("extra", Tag::List(crate::nbt::unify_list(self.extra.iter().map(Text::to_nbt).collect())));
         }
         for (k, v) in &self.style_nbt {
             c.put(k.clone(), v.clone());

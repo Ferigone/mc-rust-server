@@ -30,6 +30,9 @@ pub struct Ids {
     pub player_entity_type: i32,
     pub chat_type: i32,
     pub overworld: &'static str,
+    pub attr_movement_speed: i32,
+    pub attr_entity_range: i32,
+    pub attr_block_range: i32,
 }
 
 /// `PlayerChunkSender`.
@@ -112,6 +115,11 @@ struct Player {
     inventory: Vec<Option<(i32, i32)>>,
     selected: i8,
     first_tick_done: bool,
+    /// Najwyższa sekwencja do potwierdzenia na początku następnego ticka (`ackBlockChangesUpTo`), -1 = brak.
+    ack_up_to: i32,
+    /// Stan ekwipunku znany klientowi (`remoteSlots`) i licznik `stateId` menu.
+    remote_inv: Vec<Option<(i32, i32)>>,
+    state_id: i32,
     sneaking: bool,
     sprinting: bool,
     message_index: i32,
@@ -126,6 +134,8 @@ pub struct Game {
     players: BTreeMap<u64, Player>,
     next_entity_id: i32,
     tick: u64,
+    /// Zmienione bloki w tym ticku wg sekcji (chunk x, chunk z, sekcja y) -> pozycje lokalne.
+    dirty: BTreeMap<(i32, i32, i32), std::collections::BTreeSet<(u8, u8, u8)>>,
     game_time: i64,
     day_time: i64,
     stopping: bool,
@@ -138,7 +148,7 @@ fn pos_enc(v: f64) -> i64 {
 impl Game {
     pub fn new(shared: Arc<Shared>, data: Arc<GameData>, ids: Ids, world: World) -> Self {
         let enc = FrameEncoder::new(if shared.settings.compression_threshold >= 0 { Some(shared.settings.compression_threshold) } else { None });
-        Self { shared, data, ids, world, enc, players: BTreeMap::new(), next_entity_id: 1, tick: 0, game_time: 0, day_time: 0, stopping: false }
+        Self { shared, data, ids, world, enc, players: BTreeMap::new(), next_entity_id: 1, tick: 0, dirty: BTreeMap::new(), game_time: 0, day_time: 0, stopping: false }
     }
 
     pub fn run(mut self, rx: Receiver<GameEvent>) {
@@ -266,8 +276,8 @@ impl Game {
         let entity_id = self.next_entity_id;
         self.next_entity_id += 1;
         let gm = self.shared.settings.game_mode;
-        let (sx, sy, sz) = self.world.spawn;
-        let (x, y, z) = (sx as f64 + 0.5, sy as f64, sz as f64 + 0.5);
+        let (px, py, pz) = self.adjust_spawn_location();
+        let (x, y, z) = (px as f64 + 0.5, py as f64, pz as f64 + 0.5);
 
         info!("{name}[{addr}] logged in with entity id {entity_id} at ({x:.1}, {y:.1}, {z:.1})");
         let mut inventory = vec![None; 46];
@@ -306,6 +316,9 @@ impl Game {
             inventory,
             selected: 0,
             first_tick_done: false,
+            ack_up_to: -1,
+            remote_inv: vec![None; 46],
+            state_id: 1,
             sneaking: false,
             sprinting: false,
             message_index: 0,
@@ -314,7 +327,8 @@ impl Game {
 
         let s = &self.shared.settings;
         // 1. Login
-        let dims = [self.ids.overworld];
+        // Zbiór kluczy wymiarów jak w vanilla (`server.levelKeys()`), w kolejności obserwowanej na prawdziwym serwerze.
+        let dims = [self.ids.overworld, "minecraft:the_end", "minecraft:the_nether"];
         let login = pk::login(&pk::LoginInfo {
             entity_id,
             hardcore: s.hardcore,
@@ -327,7 +341,7 @@ impl Game {
             do_limited_crafting: false,
             dimension_type: self.ids.dimension_type,
             dimension: self.ids.overworld,
-            hashed_seed: 0,
+            hashed_seed: self.world.hashed_seed(),
             game_mode: gm,
             previous_game_mode: -1,
             is_debug: false,
@@ -358,11 +372,10 @@ impl Game {
         self.send(session, &pk::server_data(&motd, None));
         // 11. Lista graczy: istniejący -> nowy
         let others: Vec<u64> = self.players.keys().copied().filter(|k| *k != session).collect();
-        if !others.is_empty() {
-            let entries: Vec<PlayerInfoEntry<'_>> = others.iter().map(|k| Self::info_entry(&self.players[k])).collect();
-            let payload = pk::player_info_update(pk::player_info_action::INITIALIZING, &entries);
-            self.send(session, &payload);
-        }
+        // vanilla wysyła ten pakiet zawsze, także z pustą listą (createPlayerInitializing(this.players))
+        let entries: Vec<PlayerInfoEntry<'_>> = others.iter().map(|k| Self::info_entry(&self.players[k])).collect();
+        let payload = pk::player_info_update(pk::player_info_action::INITIALIZING, &entries);
+        self.send(session, &payload);
         // 12. nowy -> wszyscy (łącznie z nim)
         let payload = pk::player_info_update(pk::player_info_action::INITIALIZING, &[Self::info_entry(&self.players[&session])]);
         self.broadcast(&payload, None);
@@ -372,11 +385,17 @@ impl Game {
         let (sx, sy, sz) = self.world.spawn;
         self.send(session, &pk::set_default_spawn_position(sx, sy, sz, 0.0));
         self.send(session, &pk::game_event(pk::game_event::LEVEL_CHUNKS_LOAD_START, 0.0));
+        // tickRateManager().updateJoiningPlayer: częstotliwość ticków i krok
+        self.send(session, &pk::ticking_state(20.0, false));
+        self.send(session, &pk::ticking_step(0));
         // 14. addNewPlayer: śledzenie chunków i encji
         self.update_chunk_tracking(session);
         self.update_entity_tracking(session);
         // 15. initInventoryMenu
         self.send(session, &pk::container_set_content_empty(0, 1, 46));
+        // własne dane encji (sendPairingData dla samego gracza)
+        let data = Self::entity_data_values(&self.players[&session]);
+        self.send(session, &pk::set_entity_data(entity_id, &data));
         self.sync_status();
     }
 
@@ -538,22 +557,8 @@ impl Game {
 
     // ------------------------------------------------------------ encje
 
-    fn spawn_packets(&self, p: &Player) -> Vec<Vec<u8>> {
-        let mut v = vec![pk::add_entity(
-            p.entity_id,
-            p.uuid,
-            self.ids.player_entity_type,
-            p.x,
-            p.y,
-            p.z,
-            p.pitch,
-            p.yaw,
-            p.yaw,
-            0,
-            0,
-            0,
-            0,
-        )];
+    /// Niedomyślne wartości metadanych gracza (`SynchedEntityData.getNonDefaultValues`), rosnąco po indeksie.
+    fn entity_data_values(p: &Player) -> Vec<(u8, EntityData)> {
         let mut data: Vec<(u8, EntityData)> = Vec::new();
         let mut flags = 0i8;
         if p.sneaking {
@@ -569,8 +574,48 @@ impl Game {
         if p.info.model_customisation != 0 {
             data.push((17, EntityData::Byte(p.info.model_customisation as i8)));
         }
-        v.push(pk::set_entity_data(p.entity_id, &data));
-        v
+        if p.info.main_hand != 1 {
+            data.push((18, EntityData::Byte(p.info.main_hand as i8)));
+        }
+        data
+    }
+
+    /// Atrybuty synchronizowane z klientem dla świeżego gracza (kolejność jak w vanilla).
+    fn player_attributes(&self) -> [(i32, f64); 3] {
+        [(self.ids.attr_movement_speed, 0.1f32 as f64), (self.ids.attr_entity_range, 3.0), (self.ids.attr_block_range, 4.5)]
+    }
+
+    /// Pakiety pojawienia się gracza u obserwatora: jedna paczka (`ClientboundBundlePacket`)
+    /// z add_entity, danymi encji i atrybutami, jak w `ServerEntity.sendPairingData`.
+    fn spawn_packets(&self, p: &Player) -> Vec<Vec<u8>> {
+        vec![
+            pk::bundle_delimiter(),
+            pk::add_entity(p.entity_id, p.uuid, self.ids.player_entity_type, p.x, p.y, p.z, p.pitch, p.yaw, p.yaw, 0, 0, 0, 0),
+            pk::set_entity_data(p.entity_id, &Self::entity_data_values(p)),
+            pk::update_attributes(p.entity_id, &self.player_attributes()),
+            pk::bundle_delimiter(),
+        ]
+    }
+
+    /// `ServerPlayer.adjustSpawnLocation`: losowy punkt w kwadracie o promieniu `spawnRadius` wokół spawnu świata
+    /// (iteracja z krokiem względnie pierwszym), pierwszy z poprawnym gruntem.
+    fn adjust_spawn_location(&self) -> (i32, i32, i32) {
+        use rand::Rng;
+        const SPAWN_RADIUS: i32 = 10; // gamerule spawnRadius
+        let (sx, sy, sz) = self.world.spawn;
+        let r = SPAWN_RADIUS.max(0) as i64;
+        let side = r * 2 + 1;
+        let n = side * side;
+        let coprime = if n <= 16 { n - 1 } else { 17 };
+        let start = rand::thread_rng().gen_range(0..n);
+        for i in 0..n {
+            let idx = (start + coprime * i) % n;
+            let (dx, dz) = ((idx % side) as i32 - r as i32, (idx / side) as i32 - r as i32);
+            if let Some(y) = self.world.surface_y(sx + dx, sz + dz) {
+                return (sx + dx, y, sz + dz);
+            }
+        }
+        (sx, sy, sz)
     }
 
     /// Widoczność wg `ChunkMap.TrackedEntity.updatePlayer`: odległość pozioma <= min(zasięg, viewDistance*16)
@@ -702,6 +747,8 @@ impl Game {
             let f = pk::set_time(self.game_time, self.day_time, true);
             self.broadcast(&f, None);
         }
+        // ChunkMap.tick -> ChunkHolder.broadcastChanges: zmiany bloków trafiają do graczy śledzących chunk
+        self.flush_block_changes();
         let sessions: Vec<u64> = self.players.keys().copied().collect();
         for s in sessions {
             if !self.players.contains_key(&s) {
@@ -711,7 +758,103 @@ impl Game {
         }
     }
 
+    /// Ustawia blok i zapisuje zmianę do rozgłoszenia na początku następnego ticka.
+    fn set_block_tracked(&mut self, x: i32, y: i32, z: i32, state: u16) -> Option<u16> {
+        let old = self.world.set_block(x, y, z, state)?;
+        if old != state {
+            let sy = (y - self.world.dim.min_y) >> 4;
+            self.dirty.entry((x >> 4, z >> 4, sy)).or_default().insert(((x & 15) as u8, (z & 15) as u8, (y & 15) as u8));
+        }
+        Some(old)
+    }
+
+    /// `ChunkHolder.broadcastChanges`: 1 zmiana w sekcji -> `block_update`, więcej -> `section_blocks_update`.
+    /// Odbiorcy: gracze mający chunk w widoku i już go otrzymani (`ChunkMap.isChunkTracked`).
+    fn flush_block_changes(&mut self) {
+        if self.dirty.is_empty() {
+            return;
+        }
+        let dirty = std::mem::take(&mut self.dirty);
+        let min_y = self.world.dim.min_y;
+        for ((cx, cz, sy), set) in dirty {
+            let payload = if set.len() == 1 {
+                let &(lx, lz, ly) = set.iter().next().unwrap();
+                let (x, y, z) = ((cx << 4) + lx as i32, min_y + (sy << 4) + ly as i32, (cz << 4) + lz as i32);
+                pk::block_update(x, y, z, self.world.get_block(x, y, z) as u32)
+            } else {
+                let changes: Vec<(u16, u32)> = set
+                    .iter()
+                    .map(|&(lx, lz, ly)| {
+                        let (x, y, z) = ((cx << 4) + lx as i32, min_y + (sy << 4) + ly as i32, (cz << 4) + lz as i32);
+                        (((lx as u16) << 8) | ((lz as u16) << 4) | ly as u16, self.world.get_block(x, y, z) as u32)
+                    })
+                    .collect();
+                pk::section_blocks_update(cx, sy + (min_y >> 4), cz, &changes)
+            };
+            let f = self.frame(&payload);
+            for p in self.players.values() {
+                if p.view.is_some_and(|v| v.contains(cx, cz)) && !p.sender_state.pending.contains(&(cx, cz)) {
+                    p.sender.send(f.clone());
+                }
+            }
+        }
+    }
+
+    /// `AbstractContainerMenu.broadcastChanges`: wysyła `container_set_slot` dla slotów różniących się od stanu znanego klientowi.
+    fn broadcast_inventory_changes(&mut self, session: u64) {
+        let mut out = Vec::new();
+        {
+            let p = self.players.get_mut(&session).unwrap();
+            for slot in 0..p.inventory.len() {
+                if p.inventory[slot] != p.remote_inv[slot] {
+                    p.remote_inv[slot] = p.inventory[slot];
+                    p.state_id = (p.state_id + 1) & 0x7FFF_FFFF;
+                    out.push(pk::container_set_slot(0, p.state_id, slot as i16, p.inventory[slot]));
+                }
+            }
+        }
+        for o in out {
+            self.send(session, &o);
+        }
+    }
+
+    /// `Player.canInteractWithBlock(pos, extra)`: odległość oka od AABB bloku < (zasięg + extra).
+    fn can_interact_with_block(p: &Player, x: i32, y: i32, z: i32, extra: f64) -> bool {
+        let eye = (p.x, p.y + if p.sneaking { 1.27 } else { 1.62 }, p.z);
+        let d = |v: f64, lo: i32| (lo as f64 - v).max(v - (lo as f64 + 1.0)).max(0.0);
+        let (dx, dy, dz) = (d(eye.0, x), d(eye.1, y), d(eye.2, z));
+        let r = 4.5 + extra; // block_interaction_range
+        dx * dx + dy * dy + dz * dz < r * r
+    }
+
+    /// Czy blok (pełna kostka) nachodzi na hitbox któregoś gracza (`isUnobstructed`; uproszczenie: pełne kostki).
+    fn block_intersects_player(&self, x: i32, y: i32, z: i32) -> bool {
+        self.players.values().any(|p| {
+            if p.game_mode == 3 {
+                return false;
+            }
+            let h = if p.sneaking { 1.5 } else { 1.8 };
+            let (minx, maxx, miny, maxy, minz, maxz) = (p.x - 0.3, p.x + 0.3, p.y, p.y + h, p.z - 0.3, p.z + 0.3);
+            (x as f64) < maxx && (x as f64 + 1.0) > minx && (y as f64) < maxy && (y as f64 + 1.0) > miny && (z as f64) < maxz && (z as f64 + 1.0) > minz
+        })
+    }
+
+    fn max_build_height(&self) -> i32 {
+        self.world.dim.min_y + self.world.dim.height
+    }
+
+    /// `ServerLevel.mayInteract`: ochrona spawnu działa tylko gdy serwer ma operatorów (jeszcze ich nie ma) + granica świata.
+    fn may_interact(&self, x: i32, z: i32) -> bool {
+        const LIMIT: i32 = 29_999_984;
+        x.abs() <= LIMIT && z.abs() <= LIMIT
+    }
+
     fn tick_player(&mut self, s: u64) {
+        // ServerGamePacketListenerImpl.tick: potwierdzenie sekwencji bloków wysyłane jako pierwsze
+        let ack = std::mem::replace(&mut self.players.get_mut(&s).unwrap().ack_up_to, -1);
+        if ack > -1 {
+            self.send(s, &pk::block_changed_ack(ack));
+        }
         // przeciążone gniazdo
         if self.players[&s].sender.pending.load(Ordering::Relaxed) > MAX_PENDING_BYTES {
             return self.kick(s, Text::translatable("disconnect.timeout"));
@@ -740,12 +883,20 @@ impl Game {
             }
         }
         // pierwsze wysłanie zdrowia/doświadczenia (ServerPlayer.doTick: lastSent* = nieprawidłowe)
-        if !self.players[&s].first_tick_done {
+        let first = !self.players[&s].first_tick_done;
+        if first {
             self.players.get_mut(&s).unwrap().first_tick_done = true;
             self.send(s, &pk::set_health(20.0, 20, 5.0));
             self.send(s, &pk::set_experience(0.0, 0, 0));
         }
+        self.broadcast_inventory_changes(s);
         self.send_next_chunks(s);
+        if first {
+            // vanilla wysyła atrybuty gracza dopiero po pierwszej paczce chunków (LivingEntity.updateDirtyAttributes)
+            let eid = self.players[&s].entity_id;
+            let attrs = self.player_attributes();
+            self.send(s, &pk::update_attributes(eid, &attrs));
+        }
         self.send_entity_changes(s);
     }
 
@@ -835,10 +986,12 @@ impl Game {
                 let p = self.players.get_mut(&session).unwrap();
                 if p.game_mode == 1 && (0..46).contains(&slot) {
                     p.inventory[slot as usize] = item;
+                    // handleSetCreativeModeSlot: broadcastChanges od razu (echo potwierdzające dla klienta)
+                    self.broadcast_inventory_changes(session);
                 }
             }
             Serverbound::PlayerAction { action, x, y, z, sequence, .. } => self.on_player_action(session, action, x, y, z, sequence),
-            Serverbound::UseItemOn { x, y, z, face, sequence, hand, .. } => self.on_use_item_on(session, hand, x, y, z, face, sequence),
+            Serverbound::UseItemOn { x, y, z, face, sequence, hand, cursor, .. } => self.on_use_item_on(session, hand, x, y, z, face, cursor, sequence),
             Serverbound::PlayerAbilities { flying } => {
                 let _ = flying;
             }
@@ -928,64 +1081,148 @@ impl Game {
         }
     }
 
+    /// `CommandSourceStack.sendFailure`: `Component.empty().append(msg).withStyle(RED)`.
+    fn send_failure(&mut self, session: u64, msg: Text) {
+        let mut t = Text::empty();
+        t.color = Some("red".into());
+        t.extra = vec![msg];
+        self.send(session, &pk::system_chat(&t, false));
+    }
+
     fn on_command(&mut self, session: u64, cmd: String) {
         info!("{} issued server command: /{}", self.players[&session].name, cmd);
         let name = cmd.split_whitespace().next().unwrap_or("");
         match name {
             "list" => {
-                let names: Vec<String> = self.players.values().map(|p| p.name.clone()).collect();
+                // ListPlayersCommand: translatable z (liczba graczy, max, ComponentUtils.formatList(nazwy))
+                let names: Vec<Text> = self.players.values().map(Self::display_name).collect();
+                let list = match names.len() {
+                    0 => Text::empty(),
+                    1 => names.into_iter().next().unwrap(),
+                    _ => {
+                        let mut sep_list = Text::empty();
+                        let mut first = true;
+                        for n in names {
+                            if !first {
+                                let mut sep = Text::plain(", ");
+                                sep.color = Some("gray".into());
+                                sep_list.extra.push(sep);
+                            }
+                            sep_list.extra.push(n);
+                            first = false;
+                        }
+                        sep_list
+                    }
+                };
                 let msg = Text::translatable("commands.list.players").with_args(vec![
-                    Text::plain(self.players.len().to_string()),
-                    Text::plain(self.shared.settings.max_players.to_string()),
-                    Text::plain(names.join(", ")),
+                    Text::int(self.players.len() as i32),
+                    Text::int(self.shared.settings.max_players),
+                    list,
                 ]);
                 self.send(session, &pk::system_chat(&msg, false));
             }
             _ => {
-                // ComponentUtils.fromMessage(unknown command) + kontekst "<--[HERE]"
-                let err = Text::translatable("command.unknown.command").color("red");
-                self.send(session, &pk::system_chat(&err, false));
-                let mut ctx = Text::plain("");
+                // Brigadier: dispatcherUnknownCommand z kursorem 0 -> komunikat + kontekst "<--[HERE]" (Commands.performCommand)
+                self.send_failure(session, Text::translatable("command.unknown.command"));
+                let cursor = 0usize;
+                let mut ctx = Text::empty();
                 ctx.color = Some("gray".into());
                 ctx.style_nbt.push(("clickEvent".into(), Tag::Compound(Compound::new().with("action", Tag::string("suggest_command")).with("value", Tag::string(format!("/{cmd}"))))));
-                let mut input = Text::plain(cmd.clone());
-                input.color = Some("red".into());
-                input.style_nbt.push(("underlined".into(), Tag::Byte(1)));
+                let chars: Vec<char> = cmd.chars().collect();
+                let prefix: String = chars[cursor.saturating_sub(10)..cursor].iter().collect();
+                if cursor > 10 {
+                    ctx.extra.push(Text::plain("..."));
+                }
+                if !prefix.is_empty() {
+                    ctx.extra.push(Text::plain(prefix));
+                }
+                if cursor < chars.len() {
+                    let mut rest = Text::plain(chars[cursor..].iter().collect::<String>());
+                    rest.color = Some("red".into());
+                    rest.style_nbt.push(("underlined".into(), Tag::Byte(1)));
+                    ctx.extra.push(rest);
+                }
                 let mut here = Text::translatable("command.context.here").color("red");
                 here.italic = Some(true);
-                ctx.extra = vec![input, here];
-                self.send(session, &pk::system_chat(&ctx, false));
+                ctx.extra.push(here);
+                self.send_failure(session, ctx);
             }
         }
     }
 
+    fn ack_block_changes_up_to(&mut self, session: u64, sequence: i32) {
+        let p = self.players.get_mut(&session).unwrap();
+        p.ack_up_to = p.ack_up_to.max(sequence);
+    }
+
+    fn resend_block(&mut self, session: u64, x: i32, y: i32, z: i32) {
+        let st = self.world.get_block(x, y, z);
+        self.send(session, &pk::block_update(x, y, z, st as u32));
+    }
+
+    /// `ServerGamePacketListenerImpl.handlePlayerAction` + `ServerPlayerGameMode.handleBlockBreakAction`.
+    /// Tryb przetrwania: czasy kopania wymagają twardości bloków (M3), więc `STOP_DESTROY_BLOCK` jest przyjmowany bez weryfikacji.
     fn on_player_action(&mut self, session: u64, action: i32, x: i32, y: i32, z: i32, sequence: i32) {
-        // 0 = START_DESTROY_BLOCK, 2 = STOP_DESTROY_BLOCK. W trybie przetrwania serwer vanilla weryfikuje czas
-        // kopania (wymaga twardości bloków: roadmap); tu ufamy klientowi po STOP, w kreatywnym łamiemy od razu.
-        let gm = self.players[&session].game_mode;
-        let breaks = (action == 0 && gm == 1) || action == 2;
+        match action {
+            0..=2 => {
+                self.handle_block_break_action(session, action, x, y, z);
+                self.ack_block_changes_up_to(session, sequence);
+            }
+            _ => {} // drop / release / swap: ekwipunek i przedmioty (M8)
+        }
+    }
+
+    fn handle_block_break_action(&mut self, session: u64, action: i32, x: i32, y: i32, z: i32) {
+        let (gm, near) = {
+            let p = &self.players[&session];
+            (p.game_mode, Self::can_interact_with_block(p, x, y, z, 1.0))
+        };
+        if !near {
+            return; // "too far"
+        }
+        if y >= self.max_build_height() {
+            return self.resend_block(session, x, y, z);
+        }
         if gm == 3 {
             return;
         }
-        if breaks {
-            let air = self.world.palette.air;
-            if let Some(old) = self.world.set_block(x, y, z, air) {
-                if old != air {
-                    self.broadcast(&pk::block_update(x, y, z, air as u32), None);
+        let air = self.world.palette.air;
+        match action {
+            0 => {
+                if !self.may_interact(x, z) {
+                    return self.resend_block(session, x, y, z);
+                }
+                if gm == 1 {
+                    self.destroy_and_ack(session, x, y, z, air);
                 }
             }
-        } else if action == 0 || action == 1 {
-            // anulowanie/rozpoczęcie bez złamania: odeślij faktyczny stan
-            let st = self.world.get_block(x, y, z);
-            self.send(session, &pk::block_update(x, y, z, st as u32));
+            2 => {
+                // przetrwanie: zaufanie klientowi (patrz komentarz wyżej); adventure nie niszczy bloków
+                if gm == 0 {
+                    self.destroy_and_ack(session, x, y, z, air);
+                }
+            }
+            _ => {}
         }
-        self.send(session, &pk::block_changed_ack(sequence));
     }
 
-    fn on_use_item_on(&mut self, session: u64, hand: i32, x: i32, y: i32, z: i32, face: i32, sequence: i32) {
-        let gm = self.players[&session].game_mode;
-        let slot = if hand == 0 { 36 + self.players[&session].selected as usize } else { 45 };
-        let held = self.players[&session].inventory.get(slot).copied().flatten();
+    /// `ServerPlayerGameMode.destroyAndAck`: po udanym zniszczeniu zmiana idzie kolejką zmian chunka; po porażce odsyłamy stan.
+    fn destroy_and_ack(&mut self, session: u64, x: i32, y: i32, z: i32, air: u16) {
+        if self.set_block_tracked(x, y, z, air).is_none() {
+            self.resend_block(session, x, y, z);
+        }
+    }
+
+    /// `ServerGamePacketListenerImpl.handleUseItemOn` + `BlockItem.place` (uproszczone: stan domyślny bloku).
+    #[allow(clippy::too_many_arguments)]
+    fn on_use_item_on(&mut self, session: u64, hand: i32, x: i32, y: i32, z: i32, face: i32, cursor: (f32, f32, f32), sequence: i32) {
+        self.ack_block_changes_up_to(session, sequence);
+        if !Self::can_interact_with_block(&self.players[&session], x, y, z, 1.0) {
+            return;
+        }
+        if (cursor.0 - 0.5).abs() >= 1.0000001 || (cursor.1 - 0.5).abs() >= 1.0000001 || (cursor.2 - 0.5).abs() >= 1.0000001 {
+            return; // "Location too far away from hit block"
+        }
         // kierunki: 0 DOWN,1 UP,2 NORTH(-z),3 SOUTH(+z),4 WEST(-x),5 EAST(+x)
         let (dx, dy, dz) = match face {
             0 => (0, -1, 0),
@@ -997,27 +1234,37 @@ impl Game {
             _ => (0, 0, 0),
         };
         let (px, py, pz) = (x + dx, y + dy, z + dz);
-        let mut changed = false;
-        if let (Some((item_id, _count)), true) = (held, gm != 3 && gm != 2) {
-            // przedmiot -> blok o tej samej nazwie (uproszczenie: bez getStateForPlacement)
-            let name = self.data.registries.get("minecraft:item").and_then(|r| r.names.get(item_id as usize)).cloned();
-            if let Some(name) = name {
-                if let Some(state) = self.data.blocks.default_state(&name) {
-                    let cur = self.world.get_block(px, py, pz);
-                    if self.world.palette.is_air(cur) {
-                        self.world.set_block(px, py, pz, state as u16);
-                        self.broadcast(&pk::block_update(px, py, pz, state), None);
-                        changed = true;
+        let max_h = self.max_build_height();
+        if y < max_h {
+            let (gm, awaiting) = {
+                let p = &self.players[&session];
+                (p.game_mode, p.awaiting.is_some())
+            };
+            if !awaiting && self.may_interact(x, z) && gm != 3 && gm != 2 {
+                let slot = if hand == 0 { 36 + self.players[&session].selected as usize } else { 45 };
+                let held = self.players[&session].inventory.get(slot).copied().flatten();
+                let target_air = self.world.palette.is_air(self.world.get_block(px, py, pz));
+                if let (Some((item_id, _)), true) = (held, target_air && py < max_h && py >= self.world.dim.min_y) {
+                    // przedmiot -> blok o tej samej nazwie; stan domyślny (getStateForPlacement: M7)
+                    let name = self.data.registries.get("minecraft:item").and_then(|r| r.names.get(item_id as usize)).cloned();
+                    if let Some(state) = name.and_then(|n| self.data.blocks.default_state(&n)) {
+                        if !self.block_intersects_player(px, py, pz) && self.set_block_tracked(px, py, pz, state as u16).is_some() && gm == 0 {
+                            // przetrwanie: zużycie jednego przedmiotu z ręki
+                            let p = self.players.get_mut(&session).unwrap();
+                            if let Some((id, c)) = p.inventory[slot] {
+                                p.inventory[slot] = if c > 1 { Some((id, c - 1)) } else { None };
+                            }
+                        }
                     }
                 }
             }
+        } else {
+            let msg = Text::translatable("build.tooHigh").with_args(vec![Text::int(max_h - 1)]).color("red");
+            self.send(session, &pk::system_chat(&msg, true));
         }
-        if !changed {
-            // odeślij stan, by klient wycofał przewidywaną zmianę
-            let st = self.world.get_block(px, py, pz);
-            self.send(session, &pk::block_update(px, py, pz, st as u32));
-        }
-        self.send(session, &pk::block_changed_ack(sequence));
+        // vanilla zawsze odsyła stan klikniętego i sąsiedniego bloku, by klient wycofał przewidywaną zmianę
+        self.resend_block(session, x, y, z);
+        self.resend_block(session, px, py, pz);
     }
 }
 

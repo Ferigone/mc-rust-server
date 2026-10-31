@@ -3,7 +3,7 @@
 A port of the **Minecraft: Java Edition 1.21 / 1.21.1** server (protocol **767**) to Rust. The goal is 1:1 behaviour
 with the vanilla server, so that an unmodified Java 1.21 client can connect and play.
 
-> **Status: milestone 5 of about 12 is under way (world generation: terrain shape, biomes, surface rules and carvers are done and run in the server; features / structures are not) (see [docs/ROADMAP.md](docs/ROADMAP.md)).** This is a foundation, not a complete port.
+> **Status: milestone 5 of about 12 is under way (world generation: terrain shape, biomes, surface rules and carvers are done and run in the server; the feature decoration is under way, 40 of 233 placed features, the ores, are ported; structures are not) (see [docs/ROADMAP.md](docs/ROADMAP.md)).** This is a foundation, not a complete port.
 > Vanilla is ~4,000 classes and ~470,000 lines of code; this document states exactly what works and has been verified,
 > and what is still missing. It has not been tested with a real Minecraft client (none is available in the build
 > environment); it has been tested against Mojang's own decoders and in a differential test against the real vanilla
@@ -25,6 +25,7 @@ with the vanilla server, so that an unmodified Java 1.21 client can connect and 
 | **Biome source** (`crates/mc-worldgen`): `Climate` (quantized parameters, the parameter-space R-tree with its thread-local shortcut, the sampler, the world spawn search), the overworld parameter table (`OverworldBiomeBuilder`, 7,593 entries), the nether preset and the End island biomes | ✅ identical to the Mojang classes: all list entries, 160,000 R-tree searches including exact ties, 79,300 biomes sampled from 13 seeds / settings, 9 spawn searches; wired into the server (see below) |
 | **Surface stage** (`crates/mc-worldgen`): `SurfaceSystem` and `SurfaceRules` compiled from the `surface_rule` JSON (all 11 conditions, bandlands, bedrock floor / roof, noise thresholds), clay bands, eroded badlands pillars, frozen-ocean icebergs, the `BiomeManager` zoom (SHA-256 seed, fiddled distances), the biome temperature (`PerlinSimplexNoise`, frozen modifier), the `WORLD_SURFACE_WG` heightmap | ✅ identical to the Mojang classes: 223 chunks (the first chunk of each of 63 biomes, 9 noise settings / seeds incl. nether and End), every block and the heightmap; wired into the server (see below) |
 | **Carvers** (`crates/mc-worldgen/src/carver.rs`): `CaveWorldCarver`, `CanyonWorldCarver`, `NetherWorldCarver`, `CarvingMask`, the 17x17-chunk `applyCarvers` loop with `setLargeFeatureSeed`, float/height providers, `Mth.sin/cos` tables, the re-grassing of dirt below a cave roof (`SurfaceSystem.topMaterial`) | ✅ identical to the Mojang classes: 223 chunks of 9 settings (overworld, amplified, large biomes, nether, ...) after surface and carvers |
+| **Feature decoration** (`crates/mc-worldgen`: `decoration.rs`, `feature.rs`, `placement.rs`, `region.rs`, `generator.rs`): `FeatureSorter` order, `WorldgenRandom`, the `WorldGenRegion` of the FEATURES step (3x3 chunks, write radius 1, heightmaps), the placement modifiers `count`, `in_square`, `height_range`, `biome`, `rarity_filter`, and the `ore` / `scattered_ore` features: 40 of the 233 placed features (every ore, clay, gravel, dirt, granite, diorite, andesite, tuff, magma, soul sand, nether quartz / gold / debris, infested stone) | ✅ identical to the Mojang classes: the 3x3 chunks around the first chunk of every biome (223 centres, 2,007 chunks, 1.2 million blocks placed) after the real noise, surface, carver and feature stages; trees, vegetation, lakes, springs, disks, geodes and the other 193 placed features are not ported yet; not wired into the server yet |
 | **World generation in the server** (`crates/mc-server/src/worldgen.rs`): new worlds with `level-type` normal / large_biomes / amplified (and worlds of the vanilla server with a noise generator) get the ported terrain, biomes, surface and carvers (caves, canyons) for every chunk that is not stored in the region files; generation runs on background threads, a chunk is sent once it and its eight neighbours exist; the initial world spawn follows `MinecraftServer.setInitialSpawn` (`Climate` spawn search, then the first suitable column of the chunk spiral) | ✅ works (the probe joins a generated world and decodes the chunks); the terrain is exact only up to the surface stage, see "What is still missing" |
 | Block placement uses the real item→block mapping, replaceable blocks, and the real collision shapes against player hitboxes | ✅ (default block state only until `getStateForPlacement`, M7) |
 | **Worlds on disk**: Anvil regions (`.mca`, zlib/gzip/LZ4/uncompressed, external `.mcc`), `level.dat`, `playerdata/*.dat` (position, game mode, health, food, XP, inventory), stored heightmaps/light/block entities, `level-name`/`level-seed`, autosave, graceful save on Ctrl+C/SIGTERM | ✅ loads worlds of the vanilla server and writes worlds the vanilla server loads (see below) |
@@ -83,7 +84,7 @@ Mojang's servers onto the user's machine. Running the original server requires a
 | `tools/vanilla_compare.sh` | Differential test against the real vanilla server (requires `MC_EULA_ACCEPTED=true`). |
 | `tools/world_compare.sh`, `tools/world_compare.py` | World persistence test: vanilla generates a world, both servers load it and their chunk packets are compared; then the Rust server edits and saves the world and vanilla loads it (requires `MC_EULA_ACCEPTED=true`). |
 | `tools/remap.sh` | Produces `server-named.jar`, the vanilla server with Mojang's official names (shared by the tools below). |
-| `tools/verify_features.sh` | Runs the real `FeatureSorter` and `WorldgenRandom` (`FeatureRef.java`) and compares the feature order per decoration step and the random streams. |
+| `tools/verify_features.sh` | Runs the real `FeatureSorter` and `WorldgenRandom` (`FeatureRef.java`) and the real `applyBiomeDecoration` on carved chunks (`DecorateRef.java`, placing exactly the placed features the port implements) and compares the feature order, the random streams and the decorated chunks. |
 | `tools/verify_carvers.sh` | Runs the real surface stage and carvers (`SurfaceRef.java` with `carve`, 9 settings, 223 chunks) and compares the Rust port. |
 | `tools/worldgen_smoke.sh` | Starts a fresh normal world and lets the bot join (chunk packets of generated terrain decode, no panic). |
 | `tools/terrain_check.sh` | Generates again the chunks of a world made by the vanilla server and compares the blocks (`mc-server --check-terrain`). |
@@ -283,7 +284,24 @@ real `FeatureSorter` and `WorldgenRandom` (`tools/terrain/.../FeatureRef.java`) 
 depth-first search over `TreeMap`/`TreeSet`s ordered by (step, discovery index); `WorldgenRandom` extends the *legacy* random source, so over a Xoroshiro
 source it uses the legacy `nextInt`/`nextFloat`/`nextDouble`/`nextLong` algorithms on `nextLong() >>> (64 - bits)`, and `setSeed` does not reset its cached Gaussian.
 
-The placement modifiers, providers and the features themselves follow in the next stages.
+## Feature decoration test (milestone 5, part 7, second half)
+
+`tools/terrain/.../DecorateRef.java` runs the **real** `ChunkGenerator.applyBiomeDecoration` loop (without structures) on chunks that went through the real
+noise, surface and carver stages: for the first chunk found for every biome (in 9 noise settings / seeds, including the Nether and the End) it generates the 3x3
+chunks around it, primes the centre's heightmaps like `ChunkStatusTasks.generateFeatures`, and places the placed features with the real
+`PlacedFeature.placeWithBiomeCheck`. The `WorldGenLevel` is a `java.lang.reflect.Proxy` that behaves like the `WorldGenRegion` of the FEATURES step (the 3x3
+chunks are writable, the chunks around them hold biomes but no blocks, like chunks at the `STRUCTURE_STARTS` status). Only the placed features the Rust port
+implements are placed: `crates/mc-worldgen/examples/supported_features.rs` writes their names, so the Java reference and the port always cover the same set
+and the unported features cannot hide a difference. `crates/mc-worldgen/tests/decoration_parity.rs` compares the port: **223 centres (2,007 chunks, 1.2 million
+placed blocks) are identical**.
+
+Reproduced: the `PlacedFeature` modifiers run depth first (the Java streams are lazy), so the random draws of `count`, `in_square`, `height_range` and the feature
+interleave exactly as in vanilla; `OreFeature` writes directly into chunk sections (no heightmap update) while `ScatteredOreFeature` goes through
+`WorldGenRegion.setBlock`; both are cut off outside the 3x3 chunks (`ensureCanWrite`); the code uses `Math.round(float)` and `Mth.ceil(float)` semantics; and the biome
+filter asks the zoomed `BiomeManager`, not the stored biome of the chunk. As in the carver test, the comparison applies the `ProtoChunk.getBlockState` view (plain `air` for
+sections that hold only air-class blocks) to the Rust chunks.
+
+The remaining placement modifiers, state providers, block predicates and the other features follow in the next stages.
 
 ## Generator integration check (milestone 5, part 5)
 

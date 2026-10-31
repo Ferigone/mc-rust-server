@@ -1,10 +1,16 @@
 //! Biome decoration (`ChunkGenerator.applyBiomeDecoration`): the feature order per decoration step (`FeatureSorter`), and the
 //! placed features of the data pack.
 
+use crate::feature::Env;
+use crate::placement::{PlaceCtx, PlacedFeature};
+use crate::random::{RandomSource, WorldgenRandom};
+use crate::region::Region;
+use crate::surface::GenContext;
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
+use std::sync::Arc;
 
 /// The placed features of the data pack and the feature lists of the biomes.
 pub struct FeatureRegistry {
@@ -12,6 +18,8 @@ pub struct FeatureRegistry {
     pub placed: HashMap<String, Value>,
     /// biome -> the placed feature names of every decoration step
     pub biome_features: HashMap<String, Vec<Vec<String>>>,
+    /// `minecraft:name` -> JSON of the configured features
+    pub configured: HashMap<String, Value>,
 }
 
 fn read_dir_json(dir: &Path) -> Result<Vec<(String, Value)>> {
@@ -31,6 +39,7 @@ impl FeatureRegistry {
     /// `dir` = `<generated>/data/minecraft/worldgen`
     pub fn load(dir: &Path) -> Result<Self> {
         let placed = read_dir_json(&dir.join("placed_feature"))?.into_iter().collect();
+        let configured = read_dir_json(&dir.join("configured_feature"))?.into_iter().collect();
         let mut biome_features = HashMap::new();
         for (name, v) in read_dir_json(&dir.join("biome"))? {
             let steps = v["features"].as_array().ok_or_else(|| anyhow!("{name}: features"))?;
@@ -43,7 +52,7 @@ impl FeatureRegistry {
                 .collect::<Result<Vec<_>>>()?;
             biome_features.insert(name, lists);
         }
-        Ok(Self { placed, biome_features })
+        Ok(Self { placed, biome_features, configured })
     }
 
     /// `PlacedFeature` is a record: two entries with the same configured feature and the same modifiers are equal, so they share one index.
@@ -58,7 +67,7 @@ impl FeatureRegistry {
 pub struct StepFeatures {
     /// the registry name of every feature (the first one met when several entries are equal)
     pub names: Vec<String>,
-    keys: Vec<String>,
+    pub keys: Vec<String>,
 }
 
 impl StepFeatures {
@@ -147,6 +156,94 @@ pub fn build_features_per_step(reg: &FeatureRegistry, biomes: &[&str]) -> Result
     Ok(out)
 }
 
+/// The decoration of a dimension: the sorted features per step, the placed features the port can place, and what each biome has.
+pub struct Decorator {
+    steps: Vec<StepFeatures>,
+    /// compiled placed features by key (those the port cannot place are missing and skipped)
+    placed: HashMap<String, Arc<PlacedFeature>>,
+    /// biome -> per step the indices (into `steps[step]`) of its features
+    biome_indices: HashMap<String, Vec<Vec<usize>>>,
+    /// biome -> the keys of all its placed features (`BiomeGenerationSettings.hasFeature`)
+    biome_keys: HashMap<String, HashSet<String>>,
+    /// placed feature names the port cannot place yet, with the reason
+    pub unsupported: Vec<(String, String)>,
+}
+
+impl Decorator {
+    /// `possible_biomes` = `BiomeSource.possibleBiomes()`
+    pub fn new(reg: &FeatureRegistry, possible_biomes: &[&str], env: &Env) -> Result<Self> {
+        let steps = build_features_per_step(reg, possible_biomes)?;
+        let mut placed = HashMap::new();
+        let mut unsupported = Vec::new();
+        let mut names: Vec<&String> = reg.placed.keys().collect();
+        names.sort();
+        for name in names {
+            match PlacedFeature::parse(env, name, &reg.placed[name]) {
+                Ok(p) => {
+                    placed.entry(p.key.clone()).or_insert_with(|| Arc::new(p));
+                }
+                Err(e) => unsupported.push((name.clone(), format!("{e:#}"))),
+            }
+        }
+        let mut biome_indices = HashMap::new();
+        let mut biome_keys = HashMap::new();
+        for biome in possible_biomes {
+            let lists = reg.biome_features.get(*biome).ok_or_else(|| anyhow!("unknown biome {biome}"))?;
+            let mut per_step = Vec::new();
+            let mut keys = HashSet::new();
+            for (step, names) in lists.iter().enumerate() {
+                let mut idx = Vec::new();
+                for n in names {
+                    let key = reg.key_of(n)?;
+                    if let Some(i) = steps.get(step).and_then(|s| s.keys.iter().position(|k| *k == key)) {
+                        idx.push(i);
+                    }
+                    keys.insert(key);
+                }
+                per_step.push(idx);
+            }
+            biome_indices.insert(biome.to_string(), per_step);
+            biome_keys.insert(biome.to_string(), keys);
+        }
+        Ok(Self { steps, placed, biome_indices, biome_keys, unsupported })
+    }
+
+    /// The names of the placed features the port places, sorted (the Java reference places exactly these).
+    pub fn supported_names(&self, reg: &FeatureRegistry) -> Vec<String> {
+        let mut v: Vec<String> = reg.placed.keys().filter(|n| reg.key_of(n).is_ok_and(|k| self.placed.contains_key(&k))).cloned().collect();
+        v.sort();
+        v
+    }
+
+    /// `ChunkGenerator.applyBiomeDecoration` (without structures): `biomes` are the biomes of the 3x3 chunks around the centre that
+    /// the biome source can produce.
+    pub fn decorate(&self, region: &mut Region, world_seed: i64, range: GenContext, biomes: &HashSet<&'static str>) {
+        let (cx, cz) = region.center;
+        let origin = (cx * 16, region.min_y, cz * 16);
+        let mut random = WorldgenRandom::new(1);
+        let decoration_seed = random.set_decoration_seed(world_seed, origin.0, origin.2);
+        let biome_has_feature = |biome: &str, key: &str| self.biome_keys.get(biome).is_some_and(|k| k.contains(key));
+        let ctx = PlaceCtx { range, biome_has_feature: &biome_has_feature };
+        for step in 0..self.steps.len() {
+            // the sorted indices of the features of the biomes around
+            let mut indices: BTreeSet<usize> = BTreeSet::new();
+            for biome in biomes {
+                if let Some(per_step) = self.biome_indices.get(*biome) {
+                    if let Some(list) = per_step.get(step) {
+                        indices.extend(list.iter().copied());
+                    }
+                }
+            }
+            for index in indices {
+                let Some(feature) = self.placed.get(&self.steps[step].keys[index]) else { continue };
+                random.set_feature_seed(decoration_seed, index as i32, step as i32);
+                let r: &mut dyn RandomSource = &mut random;
+                feature.place_with_biome_check(region, &ctx, r, origin);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,7 +261,7 @@ mod tests {
             }
             biome_features.insert(b.to_string(), lists);
         }
-        FeatureRegistry { placed, biome_features }
+        FeatureRegistry { placed, biome_features, configured: HashMap::new() }
     }
 
     #[test]

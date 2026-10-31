@@ -318,7 +318,8 @@ impl NormalNoise {
                 max = max.max(i as i32);
             }
         }
-        let value_factor = 0.16666666666666666 / (0.1 * (1.0 + 1.0 / ((max - min + 1) as f64)));
+        // Java `int` arithmetic: with all amplitudes zero, max - min wraps around
+        let value_factor = 0.16666666666666666 / (0.1 * (1.0 + 1.0 / (max.wrapping_sub(min).wrapping_add(1) as f64)));
         let max_value = (first.max_value() + second.max_value()) * value_factor;
         Self { value_factor, first, second, max_value }
     }

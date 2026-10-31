@@ -33,4 +33,8 @@ for c in "${CONFIGS[@]}"; do
 done
 # the router functions at fixed positions (finer than the block level: exact climate values, magnitudes of the densities)
 java -cp "$CLS:$CP" net.minecraft.world.level.levelgen.RouterRef "$W/router_ref.txt" minecraft:overworld@12345 minecraft:overworld@-4172144997902289642 minecraft:amplified@777 minecraft:large_biomes@4242 minecraft:nether@12345 minecraft:end@12345 minecraft:caves@99 minecraft:floating_islands@99 2>&1 | grep -E "RESULT|Exception|Error" || true
-cd "$ROOT" && cargo test --release -q -p mc-worldgen --test terrain_parity --test router_parity -- --nocapture 2>&1 | grep -E "^test |test result|panicked|chunk|differ|MISMATCH|settings" || true
+# the biome source: parameter lists, R-tree searches, sampled biomes of the real MultiNoiseBiomeSource / TheEndBiomeSource, world spawn search
+rm -f "$W/biome_ref.txt"
+java -cp "$CLS:$CP" net.minecraft.world.level.levelgen.BiomeRef "$W/biome_ref.txt" minecraft:overworld@12345@overworld minecraft:overworld@-4172144997902289642@overworld minecraft:overworld@0@overworld minecraft:overworld@-1@overworld minecraft:overworld@987654321@overworld minecraft:amplified@777@overworld minecraft:large_biomes@4242@overworld minecraft:caves@99@overworld minecraft:floating_islands@99@overworld minecraft:nether@12345@nether minecraft:nether@-77@nether minecraft:end@12345@end minecraft:end@31337@end 2>&1 | grep -E "RESULT|Exception|Error" || true
+[ -f "$W/biome_ref.txt" ] || { echo "the biome reference was not generated" >&2; exit 3; }
+cd "$ROOT" && cargo test --release -q -p mc-worldgen --test terrain_parity --test router_parity --test biome_parity -- --nocapture 2>&1 | grep -E "^test |test result|panicked|chunk|differ|MISMATCH|settings" || true

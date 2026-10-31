@@ -5,7 +5,9 @@
 
 use crate::anvil::RegionStorage;
 use crate::chunk_io;
+use crate::light::LightEngine;
 use crate::level::{FlatSettings, LevelData};
+use mc_data::props::{flag, BlockProps};
 use mc_data::GameData;
 use mc_protocol::frame::FrameEncoder;
 use mc_protocol::nbt::{fastutil_open_hash_order, Compound, Tag};
@@ -164,6 +166,10 @@ pub struct Chunk {
     pub block_entities: Vec<BlockEntity>,
     /// Light comes from the stored arrays (a loaded chunk with `isLightOn`) rather than being computed.
     pub stored_light: bool,
+    /// The chunk was stored without light (`isLightOn=0`): vanilla relights it when it loads it (see `light.rs`).
+    pub relit: bool,
+    /// Stored light of the two light sections outside the block range (section Y, sky, block); used to verify the light engine.
+    pub edge_light: Vec<(i32, Option<Box<[u8; 2048]>>, Option<Box<[u8; 2048]>>)>,
     /// The stored compound without `sections`, preserved for saving.
     pub raw: Option<Compound>,
     pub modified: bool,
@@ -178,6 +184,8 @@ impl Chunk {
             heightmaps: None,
             block_entities: Vec::new(),
             stored_light: false,
+            relit: false,
+            edge_light: Vec::new(),
             raw: None,
             modified: false,
             cached: None,
@@ -199,6 +207,7 @@ impl Chunk {
 pub struct EncodeCtx<'a> {
     pub dim: Dimension,
     pub palette: &'a Palette,
+    pub props: &'a BlockProps,
 }
 
 // ------------------------------------------------------------------ encoding
@@ -353,9 +362,22 @@ fn encode_section(w: &mut Vec<u8>, s: &Section, p: &Palette) {
     }
 }
 
-/// Heightmap values (offset above `min_y`) computed from the blocks: first non-air block from the top.
-/// Exact for worlds made of full blocks only; loaded chunks use their stored heightmaps instead.
-fn computed_heightmap(chunk: &Chunk, dim: &Dimension, p: &Palette) -> Vec<i64> {
+/// `Heightmap.Types` the client reads: the predicate that decides which block counts.
+#[derive(Clone, Copy)]
+enum HeightmapType {
+    /// `WORLD_SURFACE`: not air
+    WorldSurface,
+    /// `MOTION_BLOCKING`: blocks motion or holds a fluid
+    MotionBlocking,
+}
+
+/// Heightmap values (offset above `min_y`): one above the first block from the top that matches the type's predicate.
+/// Loaded chunks use their stored heightmaps; this is used for generated and edited chunks.
+fn computed_heightmap(chunk: &Chunk, dim: &Dimension, p: &Palette, props: &BlockProps, ty: HeightmapType) -> Vec<i64> {
+    let matches = |s: u16| match ty {
+        HeightmapType::WorldSurface => !p.is_air(s),
+        HeightmapType::MotionBlocking => props.state(s as u32).is_some_and(|st| st.has(flag::BLOCKS_MOTION) || st.has(flag::FLUID)),
+    };
     let mut vals = [0u32; 256];
     for z in 0..16usize {
         for x in 0..16usize {
@@ -363,12 +385,12 @@ fn computed_heightmap(chunk: &Chunk, dim: &Dimension, p: &Palette) -> Vec<i64> {
             'col: for sy in (0..dim.sections()).rev() {
                 let sec = &chunk.sections[sy];
                 if let Blocks::Uniform(v) = sec.blocks {
-                    if p.is_air(v) {
+                    if !matches(v) {
                         continue;
                     }
                 }
                 for ly in (0..16usize).rev() {
-                    if !p.is_air(sec.get(x, ly, z)) {
+                    if matches(sec.get(x, ly, z)) {
                         h = (sy * 16 + ly + 1) as u32;
                         break 'col;
                     }
@@ -518,8 +540,10 @@ pub fn build_chunk_payload(chunk: &Chunk, cx: i32, cz: i32, ctx: &EncodeCtx<'_>,
     let (ws, mb) = match &chunk.heightmaps {
         Some(h) => (h.world_surface.clone(), h.motion_blocking.clone()),
         None => {
-            let hm = computed_heightmap(chunk, &ctx.dim, ctx.palette);
-            (hm.clone(), hm)
+            (
+                computed_heightmap(chunk, &ctx.dim, ctx.palette, ctx.props, HeightmapType::WorldSurface),
+                computed_heightmap(chunk, &ctx.dim, ctx.palette, ctx.props, HeightmapType::MotionBlocking),
+            )
         }
     };
     let mut hmc = Compound::new();
@@ -575,6 +599,8 @@ pub struct World {
     biome_ids: HashMap<String, u16>,
     template: Arc<Chunk>,
     void: Arc<Chunk>,
+    /// Light of the flat template chunk (identical for every chunk of a superflat world), computed once.
+    template_light: Option<LightData>,
     chunks: HashMap<(i32, i32), Chunk>,
     /// Chunks known not to exist on disk (avoids re-reading region files).
     absent: HashSet<(i32, i32)>,
@@ -601,6 +627,7 @@ impl World {
             biome_ids: HashMap::new(),
             template,
             void,
+            template_light: None,
             chunks: HashMap::new(),
             absent: HashSet::new(),
             storage: None,
@@ -679,6 +706,7 @@ impl World {
             data,
             template,
             void,
+            template_light: None,
             chunks: HashMap::new(),
             absent: HashSet::new(),
             storage: Some(RegionStorage::new(dir.join("region"))),
@@ -730,6 +758,11 @@ impl World {
             Fallback::Flat => &self.template,
             Fallback::Void => &self.void,
         }
+    }
+
+    /// A chunk that is already loaded (no disk access, no fallback).
+    pub fn loaded_chunk(&self, cx: i32, cz: i32) -> Option<&Chunk> {
+        self.chunks.get(&(cx, cz))
     }
 
     pub fn chunk(&mut self, cx: i32, cz: i32) -> &Chunk {
@@ -790,7 +823,23 @@ impl World {
             chunk.sections[sy >> 4].set((x & 15) as usize, sy & 15, (z & 15) as usize, state);
             chunk.cached = None;
             chunk.modified = true;
+            // the stored light is out of date: from now on the light engine computes this chunk's light
+            chunk.stored_light = false;
             self.dirty.insert(key);
+            // light spreads at most 15 blocks, so chunks within reach of the edit change too
+            for dx in -1..=1 {
+                for dz in -1..=1 {
+                    let (kx, kz) = (key.0 + dx, key.1 + dz);
+                    let dist_x = (kx * 16 - x).max(x - (kx * 16 + 15)).max(0);
+                    let dist_z = (kz * 16 - z).max(z - (kz * 16 + 15)).max(0);
+                    if dist_x.max(dist_z) <= 15 {
+                        if let Some(c) = self.chunks.get_mut(&(kx, kz)) {
+                            c.cached = None;
+                            c.stored_light = false;
+                        }
+                    }
+                }
+            }
         }
         Some(old)
     }
@@ -803,8 +852,19 @@ impl World {
                 return f;
             }
         }
-        // stored light needs the 3x3 neighbourhood
-        let stored = real && self.chunks.get(&(cx, cz)).is_some_and(|c| c.stored_light);
+        // Stored light is only trusted when the chunk and all its loaded neighbours are lit: vanilla relights an unlit
+        // neighbour when it loads it, which changes the light of the chunks around it as well.
+        let mut stored = real && self.chunks.get(&(cx, cz)).is_some_and(|c| c.stored_light);
+        if stored {
+            for dx in -1..=1 {
+                for dz in -1..=1 {
+                    self.ensure(cx + dx, cz + dz);
+                    if self.chunks.get(&(cx + dx, cz + dz)).is_some_and(|c| !c.stored_light) {
+                        stored = false;
+                    }
+                }
+            }
+        }
         let neighbourhood_top = if stored {
             let mut top: Option<usize> = None;
             for dx in -1..=1 {
@@ -818,12 +878,21 @@ impl World {
         } else {
             None
         };
-        let ctx = EncodeCtx { dim: self.dim, palette: &self.palette };
+        // chunks without trusted stored light: the light engine (the void fallback keeps the simple "sky above" light)
+        let light = if stored {
+            None
+        } else {
+            Some(self.engine_light(cx, cz, real))
+        };
+        let ctx = EncodeCtx { dim: self.dim, palette: &self.palette, props: &self.data.block_props };
         let chunk = match self.chunks.get(&(cx, cz)) {
             Some(c) => c,
             None => self.fallback_chunk(),
         };
-        let light = if chunk.stored_light { stored_light(chunk, neighbourhood_top, &ctx.dim, &self.palette) } else { computed_light(chunk, &ctx.dim, &self.palette) };
+        let light = match light {
+            Some(l) => l,
+            None => stored_light(chunk, neighbourhood_top, &ctx.dim, &self.palette),
+        };
         let payload = build_chunk_payload(chunk, cx, cz, &ctx, &light);
         let frame = Arc::new(enc.encode(&payload));
         if real {
@@ -832,6 +901,40 @@ impl World {
             }
         }
         frame
+    }
+
+    /// Light of a chunk computed by the light engine from the blocks of the 3x3 chunks around it. Missing neighbours count as
+    /// superflat template chunks in a flat world and as absent otherwise.
+    fn engine_light(&mut self, cx: i32, cz: i32, real: bool) -> LightData {
+        let flat = self.fallback == Fallback::Flat;
+        if !real {
+            match self.fallback {
+                Fallback::Void => return computed_light(&self.void, &self.dim, &self.palette),
+                Fallback::Flat => {
+                    if let Some(l) = &self.template_light {
+                        return l.clone();
+                    }
+                }
+            }
+        }
+        for dx in -2..=2 {
+            for dz in -2..=2 {
+                self.ensure(cx + dx, cz + dz);
+            }
+        }
+        let engine = LightEngine::new(&self.data.block_props, &self.palette, self.dim);
+        let template: &Chunk = &self.template;
+        let chunks = &self.chunks;
+        let light = if real {
+            engine.light_chunk(cx, cz, &|x, z| chunks.get(&(x, z)).or(if flat { Some(template) } else { None })).to_light_data()
+        } else {
+            // a chunk of the superflat world surrounded by superflat chunks
+            engine.light_chunk(cx, cz, &|_, _| Some(template)).to_light_data()
+        };
+        if !real {
+            self.template_light = Some(light.clone());
+        }
+        light
     }
 
     fn write_chunk(&mut self, key: (i32, i32), game_time: i64) -> bool {
@@ -942,7 +1045,7 @@ mod tests {
         // Mth.ceillog2(384 + 1) = 9 -> 7 values per long -> 37 longs
         let dim = Dimension { min_y: -64, height: 384 };
         let mut w = World::flat(dim, pal(), &[7, 10, 10, 9], 1, 12345, no_data());
-        let hm = computed_heightmap(w.chunk(0, 0), &dim, &pal());
+        let hm = computed_heightmap(w.chunk(0, 0), &dim, &pal(), &BlockProps::default(), HeightmapType::WorldSurface);
         assert_eq!(hm.len(), 37);
         // height 4 in every column: 7 values of 9 bits in the first long
         let expect: u64 = (0..7).fold(0u64, |a, i| a | (4u64 << (i * 9)));

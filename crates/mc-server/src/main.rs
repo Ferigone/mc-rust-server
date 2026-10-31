@@ -6,6 +6,7 @@ mod auth;
 mod config;
 mod game;
 mod level;
+mod light;
 mod net;
 mod playerdata;
 mod prepare;
@@ -46,12 +47,14 @@ fn main() -> Result<()> {
 
     let mut data_arg = None;
     let mut run_dir: Option<PathBuf> = None;
+    let mut check_light = false;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--data" => data_arg = args.next().map(PathBuf::from),
             "--dir" => run_dir = args.next().map(PathBuf::from),
             "nogui" | "--nogui" => {}
+            "--check-light" => check_light = true,
             "-h" | "--help" => {
                 println!("mc-server [--data <generated dir>] [--dir <server dir>]");
                 return Ok(());
@@ -105,6 +108,12 @@ fn main() -> Result<()> {
         // DedicatedServer.forceDifficulty: server.properties wins on every start (hardcore forces HARD)
         let hardcore = level.hardcore();
         level.data_mut().put("Difficulty", mc_protocol::nbt::Tag::Byte(if hardcore { 3 } else { settings.difficulty as i8 }));
+    }
+
+    if check_light {
+        // verification mode (tools/light_check.sh): recompute the light of the stored chunks and compare it with vanilla's
+        let ok = light::check_world(&mut world, &data.block_props, 64);
+        std::process::exit(if ok { 0 } else { 1 });
     }
 
     let ids = game::Ids {

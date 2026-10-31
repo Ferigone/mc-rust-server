@@ -3,7 +3,7 @@
 A port of the **Minecraft: Java Edition 1.21 / 1.21.1** server (protocol **767**) to Rust. The goal is 1:1 behaviour
 with the vanilla server, so that an unmodified Java 1.21 client can connect and play.
 
-> **Status: milestone 2 of about 12 (see [docs/ROADMAP.md](docs/ROADMAP.md)).** This is a foundation, not a complete port.
+> **Status: milestone 3 of about 12 (see [docs/ROADMAP.md](docs/ROADMAP.md)).** This is a foundation, not a complete port.
 > Vanilla is ~4,000 classes and ~470,000 lines of code; this document states exactly what works and has been verified,
 > and what is still missing. It has not been tested with a real Minecraft client (none is available in the build
 > environment); it has been tested against Mojang's own decoders and in a differential test against the real vanilla
@@ -20,6 +20,7 @@ with the vanilla server, so that an unmodified Java 1.21 client can connect and 
 | Play: Login, position, chunk batches (`PlayerChunkSender` algorithm), chunk tracking view (`ChunkTrackingView`) | ✅ |
 | Keep-alive, chat (unsigned), `/list`, visibility and movement of other players (`ServerEntity.sendChanges`) | ✅ |
 | Block breaking/placing (simplified), 20 TPS | ⚠️ simplified |
+| Block placement uses the real item→block mapping, replaceable blocks, and the real collision shapes against player hitboxes | ✅ (default block state only until `getStateForPlacement`, M7) |
 | **Worlds on disk**: Anvil regions (`.mca`, zlib/gzip/LZ4/uncompressed, external `.mcc`), `level.dat`, `playerdata/*.dat` (position, game mode, health, food, XP, inventory), stored heightmaps/light/block entities, `level-name`/`level-seed`, autosave, graceful save on Ctrl+C/SIGTERM | ✅ loads worlds of the vanilla server and writes worlds the vanilla server loads (see below) |
 | `server.properties` (same keys and defaults as vanilla) | ✅ read/write |
 
@@ -35,7 +36,7 @@ Everything is itemised in [docs/ROADMAP.md](docs/ROADMAP.md).
 
 * `enforce-secure-profile` is ignored (always "false"): chat is unsigned.
 * In survival mode a block break on `STOP_DESTROY_BLOCK` is accepted without verifying the mining time.
-* A placed block gets its default state (no `getStateForPlacement`), item → block by name; collision with players is computed as a full cube.
+* A placed block gets its default state (no `getStateForPlacement`, no `canSurvive`); only players are checked for collision (other entities: M6).
 * No movement speed validation (anti-cheat) apart from rejecting NaN/infinity/out-of-world values.
 * A chunk edited by the Rust server is saved without its light and heightmaps and with `isLightOn=0` (vanilla relights it on load); nothing else of a chunk (entities, ticks, structures, POI) is changed or dropped.
 * Only the overworld is loaded; stored block/fluid ticks are kept but not executed yet (vanilla executes them right after loading: leaf decay, flowing water, ...).
@@ -69,7 +70,8 @@ Mojang's servers onto the user's machine. Running the original server requires a
 | `tools/e2e.sh` | Starts the server and bots and runs the whole verification with one command. |
 | `tools/vanilla_compare.sh` | Differential test against the real vanilla server (requires `MC_EULA_ACCEPTED=true`). |
 | `tools/world_compare.sh`, `tools/world_compare.py` | World persistence test: vanilla generates a world, both servers load it and their chunk packets are compared; then the Rust server edits and saves the world and vanilla loads it (requires `MC_EULA_ACCEPTED=true`). |
-| `tools/dump_block_flags.sh` | Dumps per-state facts (air, fluid) from the real Mojang block classes; the `fluid_rule_matches_vanilla` test checks the Rust rule against all 26,684 states. |
+| `tools/remap.sh` | Produces `server-named.jar`, the vanilla server with Mojang's official names (shared by the tools below). |
+| `tools/dump_props.sh` | Runs the **real** block and item classes and dumps per-state facts (hardness, blast resistance, light emission / opacity, collision / outline / occlusion shapes, 18 flags such as `isAir`, "holds a fluid", replaceable) and per-item facts (stack size, durability, placed block) into `reference/gen/generated/reports/{block_props,item_props}.tsv`. Run by `tools/fetch_reference.sh`. |
 | `tools/cmp_dumps.py`, `tools/cmp_chunk.py` | Compare packet dumps / take a chunk apart piece by piece. |
 
 The field layout of every packet was reconstructed from the decompiled code (`net.minecraft.network.protocol.*`),

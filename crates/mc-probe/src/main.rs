@@ -32,6 +32,8 @@ struct Args {
     brk: Option<Option<(i32, i32, i32)>>,
     place: Option<Option<(i32, i32, i32)>>,
     place_beside: bool,
+    /// Item ID put into the creative slot by `--place` (default: stone).
+    item_id: i32,
     walk: bool,
     online: bool,
     session_url: String,
@@ -72,6 +74,7 @@ fn parse_args() -> Result<Args> {
         brk: None,
         place: None,
         place_beside: false,
+        item_id: 1,
         walk: false,
         online: false,
         session_url: "http://127.0.0.1:8089".into(),
@@ -94,6 +97,7 @@ fn parse_args() -> Result<Args> {
                 a.place_beside = v == "beside";
                 a.place = Some(parse_pos_or_below(&v)?)
             }
+            "--item-id" => a.item_id = it.next().unwrap().parse()?,
             "--protocol" => a.protocol = it.next().unwrap().parse()?,
             "--walk" => a.walk = true,
             "--online" => a.online = true,
@@ -595,7 +599,7 @@ async fn join(a: &Args) -> Result<()> {
             let target = if a.place_beside { (below.0 + 1, below.1, below.2) } else { below };
             if let Some((x, y, z)) = a.place.map(|p| p.unwrap_or(target)) {
                 // stone (minecraft:stone) into slot 36 (hotbar 0) in creative mode, then UseItemOn on the top face
-                let stone = 1; // item ID of stone from the minecraft:item registry
+                let stone = a.item_id; // item ID from the minecraft:item registry (default 1 = stone)
                 batch.push(mc_protocol::frame::payload(sbp::SET_CREATIVE_MODE_SLOT, |w| {
                     w.put_i16(36);
                     w.put_varint(1);

@@ -91,7 +91,7 @@ fn main() -> Result<()> {
         void_air: st("minecraft:void_air") as u16,
         block_state_count: data.blocks.state_count,
         biome_count: data.dynamic_registry("minecraft:worldgen/biome").unwrap().entries.len() as u32,
-        fluid: std::sync::Arc::new((0..data.blocks.state_count).map(|s| data.blocks.has_fluid(s)).collect()),
+        fluid: std::sync::Arc::new((0..data.blocks.state_count).map(|s| data.block_props.state(s).is_some_and(|p| p.has(mc_data::props::flag::FLUID))).collect()),
     };
     let new_world = world::NewWorld {
         name: settings.level_name.clone(),

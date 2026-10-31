@@ -33,4 +33,7 @@ if [ ! -d "$REF/gen/generated/reports" ]; then
   echo "[gen] running the official data generator (--all)"
   (cd "$REF/gen" && java -DbundlerMainClass=net.minecraft.data.Main -jar "$REF/dl/server.jar" --all --output "$REF/gen/generated" >/dev/null)
 fi
+# per-state block facts and item facts from the real classes (hardness, light, shapes, ...): needs the remapped jar
+echo "[props] dumping block and item properties from the real classes"
+"$ROOT/tools/dump_props.sh"
 echo "OK: $REF/gen/generated/{reports,data,assets}"

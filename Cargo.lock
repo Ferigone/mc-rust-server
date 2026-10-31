@@ -498,6 +498,7 @@ dependencies = [
  "lz4_flex",
  "mc-data",
  "mc-protocol",
+ "mc-worldgen",
  "md-5",
  "rand",
  "rsa",

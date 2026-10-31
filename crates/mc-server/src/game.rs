@@ -717,7 +717,16 @@ impl Game {
             dx * dx + dz * dz
         };
         list.sort_by_key(|c| (dist(c), c.0, c.1));
-        list.truncate(quota_chunks);
+        // only chunks that exist (with their neighbours, which the light engine reads) can be sent; for the others the generator
+        // threads are asked, and a few more chunks behind the quota are queued so the workers always have something to do
+        let mut ready = Vec::with_capacity(quota_chunks);
+        for &(x, z) in list.iter().take(quota_chunks + 48) {
+            let r = self.world.ready_for_send(x, z);
+            if r && ready.len() < quota_chunks {
+                ready.push((x, z));
+            }
+        }
+        let list = ready;
         if list.is_empty() {
             return;
         }
@@ -972,6 +981,8 @@ impl Game {
 
     fn do_tick(&mut self) {
         self.tick += 1;
+        // chunks the generator threads finished since the last tick
+        self.world.poll_generated();
         self.game_time += 1;
         if self.rules.daylight_cycle {
             self.day_time += 1;

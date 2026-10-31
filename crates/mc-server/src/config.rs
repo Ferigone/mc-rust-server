@@ -33,7 +33,7 @@ const DEFAULTS: &[(&str, &str)] = &[
     ("initial-enabled-packs", "vanilla"),
     ("level-name", "world"),
     ("level-seed", ""),
-    ("level-type", "minecraft\\:normal"),
+    ("level-type", "minecraft:normal"),
     ("log-ips", "true"),
     ("max-chained-neighbor-updates", "1000000"),
     ("max-players", "20"),
@@ -236,5 +236,20 @@ mod tests {
         // "hello".hashCode() == 99162322 w Javie
         assert_eq!(java_string_hash("hello"), 99162322);
         assert_eq!(parse_seed("hello"), 99162322);
+    }
+
+    #[test]
+    fn default_level_type_is_stored_escaped_and_read_unescaped() {
+        let dir = std::env::temp_dir().join(format!("mc-config-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("server.properties");
+        let created = Properties::load_or_create(&path).unwrap();
+        assert_eq!(created.str("level-type"), "minecraft:normal");
+        // like Java's Properties.store: the colon is escaped in the file
+        assert!(std::fs::read_to_string(&path).unwrap().contains("level-type=minecraft\\:normal"));
+        let loaded = Properties::load_or_create(&path).unwrap();
+        assert_eq!(Settings::from(&loaded).level_type, "minecraft:normal");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

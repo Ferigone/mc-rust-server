@@ -152,6 +152,26 @@ impl LevelData {
         Some(FlatSettings { layers, biome: settings.get_str("biome").unwrap_or("minecraft:plains").to_owned() })
     }
 
+    /// The overworld's noise generator: (noise settings name, biome source type or multi-noise preset).
+    pub fn noise_generator(&self) -> Option<(String, String)> {
+        let generator = self
+            .data()
+            .get_compound("WorldGenSettings")?
+            .get_compound("dimensions")?
+            .get_compound("minecraft:overworld")?
+            .get_compound("generator")?;
+        if generator.get_str("type") != Some("minecraft:noise") {
+            return None;
+        }
+        let settings = generator.get_str("settings")?.to_owned();
+        let source = generator.get_compound("biome_source")?;
+        let kind = match source.get_str("type")? {
+            "minecraft:multi_noise" => source.get_str("preset")?.to_owned(),
+            other => other.to_owned(),
+        };
+        Some((settings, kind))
+    }
+
     /// Whether the overworld uses a normal (noise based) generator.
     #[cfg(test)]
     pub fn is_noise_world(&self) -> bool {
@@ -162,6 +182,27 @@ impl LevelData {
             .and_then(|o| o.get_compound("generator"))
             .and_then(|g| g.get_str("type"))
             == Some("minecraft:noise")
+    }
+
+    /// A new normal world's `level.dat`: like a superflat one but with the noise generator in the overworld.
+    pub fn new_noise(name: &str, seed: i64, game_type: i32, difficulty: u8, hardcore: bool, spawn: (i32, i32, i32), settings: &str) -> Self {
+        let mut level = Self::new_flat(name, seed, game_type, difficulty, hardcore, spawn, &FlatSettings::default());
+        let generator = Compound::new()
+            .with("type", Tag::string("minecraft:noise"))
+            .with("settings", Tag::string(settings))
+            .with("biome_source", Tag::Compound(Compound::new().with("type", Tag::string("minecraft:multi_noise")).with("preset", Tag::string("minecraft:overworld"))));
+        let overworld = Compound::new().with("generator", Tag::Compound(generator)).with("type", Tag::string("minecraft:overworld"));
+        fn child<'a>(c: &'a mut Compound, key: &str) -> &'a mut Compound {
+            match c.0.iter_mut().find(|(k, _)| k == key) {
+                Some((_, Tag::Compound(c))) => c,
+                _ => unreachable!("level.dat of a new world has {key}"),
+            }
+        }
+        let wgs = child(level.data_mut(), "WorldGenSettings");
+        wgs.put("generate_features", Tag::Byte(1));
+        let dims = child(wgs, "dimensions");
+        dims.put("minecraft:overworld", Tag::Compound(overworld));
+        level
     }
 
     /// A new flat world's `level.dat` (same fields vanilla writes for a superflat world).
@@ -292,5 +333,14 @@ mod tests {
         assert_eq!(back.flat_settings().unwrap().layers.len(), 3);
         assert!(!back.is_noise_world());
         assert!(back.rule_bool("doDaylightCycle", true));
+    }
+
+    #[test]
+    fn new_noise_world_has_a_noise_generator() {
+        let ld = LevelData::new_noise("world", 1, 0, 2, false, (0, 64, 0), "minecraft:amplified");
+        assert!(ld.is_noise_world());
+        assert!(ld.flat_settings().is_none());
+        assert_eq!(ld.noise_generator(), Some(("minecraft:amplified".to_owned(), "minecraft:overworld".to_owned())));
+        assert_eq!(ld.seed(), 1);
     }
 }

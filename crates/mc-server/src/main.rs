@@ -11,6 +11,7 @@ mod net;
 mod playerdata;
 mod prepare;
 mod world;
+mod worldgen;
 
 use anyhow::{Context, Result};
 use config::{Properties, Settings};
@@ -48,6 +49,7 @@ fn main() -> Result<()> {
     let mut data_arg = None;
     let mut run_dir: Option<PathBuf> = None;
     let mut check_light = false;
+    let mut check_terrain = false;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -55,6 +57,7 @@ fn main() -> Result<()> {
             "--dir" => run_dir = args.next().map(PathBuf::from),
             "nogui" | "--nogui" => {}
             "--check-light" => check_light = true,
+            "--check-terrain" => check_terrain = true,
             "-h" | "--help" => {
                 println!("mc-server [--data <generated dir>] [--dir <server dir>]");
                 return Ok(());
@@ -98,6 +101,7 @@ fn main() -> Result<()> {
     };
     let new_world = world::NewWorld {
         name: settings.level_name.clone(),
+        level_type: settings.level_type.clone(),
         seed: config::parse_seed(&settings.level_seed),
         game_type: settings.game_mode as i32,
         difficulty: settings.difficulty,
@@ -113,6 +117,12 @@ fn main() -> Result<()> {
     if check_light {
         // verification mode (tools/light_check.sh): recompute the light of the stored chunks and compare it with vanilla's
         let ok = light::check_world(&mut world, &data.block_props, 64);
+        std::process::exit(if ok { 0 } else { 1 });
+    }
+
+    if check_terrain {
+        // verification mode (tools/terrain_check.sh): generate the chunks stored in a vanilla world and compare the blocks
+        let ok = world.check_terrain(40);
         std::process::exit(if ok { 0 } else { 1 });
     }
 

@@ -7,6 +7,7 @@ use crate::anvil::RegionStorage;
 use crate::chunk_io;
 use crate::light::LightEngine;
 use crate::level::{FlatSettings, LevelData};
+use crate::worldgen::{BiomeSourceKind, GenPool, Generated, Generator};
 use mc_data::props::{flag, BlockProps};
 use mc_data::GameData;
 use mc_protocol::frame::FrameEncoder;
@@ -577,11 +578,15 @@ pub enum Fallback {
     Flat,
     /// Empty air (for worlds whose generator is not ported yet).
     Void,
+    /// The ported noise generator (terrain, biomes, surface; no carvers / features / structures yet).
+    Generated,
 }
 
 /// Parameters for creating a world that does not exist yet.
 pub struct NewWorld {
     pub name: String,
+    /// `level-type` of server.properties (`minecraft:normal`, `minecraft:flat`, `minecraft:large_biomes`, `minecraft:amplified`)
+    pub level_type: String,
     pub seed: i64,
     pub game_type: i32,
     pub difficulty: u8,
@@ -604,6 +609,8 @@ pub struct World {
     chunks: HashMap<(i32, i32), Chunk>,
     /// Chunks known not to exist on disk (avoids re-reading region files).
     absent: HashSet<(i32, i32)>,
+    generator: Option<Arc<Generator>>,
+    pool: Option<GenPool>,
     storage: Option<RegionStorage>,
     dir: Option<PathBuf>,
     dirty: HashSet<(i32, i32)>,
@@ -630,6 +637,8 @@ impl World {
             template_light: None,
             chunks: HashMap::new(),
             absent: HashSet::new(),
+            generator: None,
+            pool: None,
             storage: None,
             dir: None,
             dirty: HashSet::new(),
@@ -648,7 +657,8 @@ impl World {
         chunk
     }
 
-    /// Opens (or creates) the world in `dir`. Chunks come from the region files; ungenerated ones from the fallback.
+    /// Opens (or creates) the world in `dir`. Chunks come from the region files; ungenerated ones from the generator
+    /// (superflat template, the ported noise generator, or empty air for generators that are not ported).
     pub fn open(dir: PathBuf, data: Arc<GameData>, dim: Dimension, palette: Palette, new_world: NewWorld) -> anyhow::Result<Self> {
         let biome_ids: HashMap<String, u16> = data
             .dynamic_registry("minecraft:worldgen/biome")
@@ -656,35 +666,95 @@ impl World {
             .unwrap_or_default();
         let level_path = dir.join("level.dat");
         let mut level = LevelData::load(&level_path)?;
-        let flat_cfg: Option<FlatSettings>;
-        let (seed, spawn);
+        enum Kind {
+            Flat(FlatSettings),
+            Noise { settings: String, source: BiomeSourceKind },
+            Unsupported,
+        }
+        let source_kind = |s: &str| match s {
+            "minecraft:nether" => BiomeSourceKind::Nether,
+            "minecraft:the_end" => BiomeSourceKind::End,
+            _ => BiomeSourceKind::Overworld,
+        };
+        let kind: Kind;
+        let (seed, mut spawn);
+        let mut created_noise = false;
         match &level {
             Some(l) => {
                 if l.data_version() != 0 && l.data_version() != crate::level::DATA_VERSION && l.data_version() != 3953 {
                     warn!("level.dat has DataVersion {} (this server supports 1.21/1.21.1 = 3953/3955); upgrading older worlds is not implemented", l.data_version());
                 }
-                flat_cfg = l.flat_settings();
+                kind = match (l.flat_settings(), l.noise_generator()) {
+                    (Some(f), _) => Kind::Flat(f),
+                    (None, Some((settings, src))) => Kind::Noise { settings, source: source_kind(&src) },
+                    _ => Kind::Unsupported,
+                };
                 seed = l.seed();
                 spawn = l.spawn();
             }
             None => {
-                flat_cfg = Some(FlatSettings::default());
                 seed = new_world.seed;
-                let layers_h: i32 = FlatSettings::default().layers.iter().map(|l| l.1).sum();
-                spawn = (0, dim.min_y + layers_h, 0);
-                let l = LevelData::new_flat(&new_world.name, seed, new_world.game_type, new_world.difficulty, new_world.hardcore, spawn, flat_cfg.as_ref().unwrap());
                 std::fs::create_dir_all(&dir)?;
-                l.save(&level_path)?;
-                info!("Created a new flat world in {}", dir.display());
-                level = Some(l);
+                match new_world.level_type.trim_start_matches("minecraft:") {
+                    "flat" => {
+                        let cfg = FlatSettings::default();
+                        let layers_h: i32 = cfg.layers.iter().map(|l| l.1).sum();
+                        spawn = (0, dim.min_y + layers_h, 0);
+                        let l = LevelData::new_flat(&new_world.name, seed, new_world.game_type, new_world.difficulty, new_world.hardcore, spawn, &cfg);
+                        l.save(&level_path)?;
+                        info!("Created a new flat world in {}", dir.display());
+                        level = Some(l);
+                        kind = Kind::Flat(cfg);
+                    }
+                    other => {
+                        let settings = match other {
+                            "large_biomes" => "minecraft:large_biomes",
+                            "amplified" => "minecraft:amplified",
+                            _ => "minecraft:overworld",
+                        };
+                        if !matches!(other, "normal" | "default" | "large_biomes" | "amplified") {
+                            warn!("level-type {} is not supported, using minecraft:normal", new_world.level_type);
+                        }
+                        spawn = (0, 64, 0);
+                        let l = LevelData::new_noise(&new_world.name, seed, new_world.game_type, new_world.difficulty, new_world.hardcore, spawn, settings);
+                        l.save(&level_path)?;
+                        info!("Created a new world ({settings}) in {}", dir.display());
+                        level = Some(l);
+                        kind = Kind::Noise { settings: settings.to_owned(), source: BiomeSourceKind::Overworld };
+                        created_noise = true;
+                    }
+                }
             }
         }
-        let fallback = if flat_cfg.is_some() { Fallback::Flat } else { Fallback::Void };
-        if fallback == Fallback::Void {
-            warn!("This world uses the noise generator, which is not ported yet: chunks that are not stored in the region files are served empty");
-        }
+        // the generator for chunks that are not stored
+        let mut generator = None;
+        let fallback = match &kind {
+            Kind::Flat(_) => Fallback::Flat,
+            Kind::Noise { settings, source } => match Generator::new(data.clone(), dim, seed, settings, *source) {
+                Ok(g) => {
+                    generator = Some(Arc::new(g));
+                    Fallback::Generated
+                }
+                Err(e) => {
+                    warn!("Could not set up the {settings} generator ({e:#}): chunks that are not stored in the region files are served empty");
+                    Fallback::Void
+                }
+            },
+            Kind::Unsupported => {
+                warn!("This world uses a generator that is not ported yet: chunks that are not stored in the region files are served empty");
+                Fallback::Void
+            }
+        };
+        let pool = generator.as_ref().map(|g| {
+            let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2).max(2);
+            info!("World generation: {threads} threads");
+            GenPool::new(g.clone(), threads)
+        });
         // flat template from the generator settings
-        let cfg = flat_cfg.unwrap_or_default();
+        let cfg = match kind {
+            Kind::Flat(f) => f,
+            _ => FlatSettings::default(),
+        };
         let mut layers: Vec<u16> = Vec::new();
         for (block, height) in &cfg.layers {
             let st = data.blocks.default_state(block).unwrap_or(0) as u16;
@@ -695,7 +765,7 @@ impl World {
         let plains = *biome_ids.get(&cfg.biome).or_else(|| biome_ids.get("minecraft:plains")).unwrap_or(&0);
         let template = Arc::new(Self::flat_template(&dim, &palette, &layers, plains));
         let void = Arc::new(Chunk::empty(&dim, &palette, plains));
-        Ok(Self {
+        let mut world = Self {
             seed,
             dim,
             palette,
@@ -709,10 +779,271 @@ impl World {
             template_light: None,
             chunks: HashMap::new(),
             absent: HashSet::new(),
+            generator,
+            pool,
             storage: Some(RegionStorage::new(dir.join("region"))),
             dir: Some(dir),
             dirty: HashSet::new(),
-        })
+        };
+        if created_noise && world.generator.is_some() {
+            spawn = world.initial_spawn();
+            world.spawn = spawn;
+            if let (Some(level), Some(dir)) = (world.level.as_mut(), world.dir.as_ref()) {
+                let d = level.data_mut();
+                d.put("SpawnX", Tag::Int(spawn.0));
+                d.put("SpawnY", Tag::Int(spawn.1));
+                d.put("SpawnZ", Tag::Int(spawn.2));
+                if let Err(e) = level.save(&dir.join("level.dat")) {
+                    warn!("Could not save level.dat: {e}");
+                }
+            }
+            info!("World spawn: {} {} {}", spawn.0, spawn.1, spawn.2);
+        }
+        Ok(world)
+    }
+
+    // ------------------------------------------------------------ the generator
+
+    /// Converts a generated chunk to the server's chunk model.
+    fn assemble(&self, g: Generated, cx: i32, cz: i32) -> Chunk {
+        let plains = self.biome_ids.get("minecraft:plains").copied().unwrap_or(0);
+        let mut chunk = Chunk::empty(&self.dim, &self.palette, plains);
+        let min_quart_y = self.dim.min_y >> 2;
+        for (i, section) in chunk.sections.iter_mut().enumerate() {
+            let blocks = &g.blocks[i * SECTION_BLOCKS..(i + 1) * SECTION_BLOCKS];
+            section.blocks = if blocks.iter().all(|&b| b == blocks[0]) {
+                Blocks::Uniform(blocks[0])
+            } else {
+                let mut arr = Box::new([0u16; SECTION_BLOCKS]);
+                arr.copy_from_slice(blocks);
+                Blocks::Full(arr)
+            };
+            // biomes: vanilla's container index is y << 4 | z << 2 | x
+            let mut cells = Box::new([plains; 64]);
+            for y in 0..4 {
+                for z in 0..4 {
+                    for x in 0..4 {
+                        let name = g.biomes.get_noise_biome(cx * 4 + x, min_quart_y + (i as i32) * 4 + y, cz * 4 + z);
+                        cells[((y << 4) | (z << 2) | x) as usize] = self.biome_ids.get(name).copied().unwrap_or(plains);
+                    }
+                }
+            }
+            section.biomes = if cells.iter().all(|&b| b == cells[0]) { Biomes::Uniform(cells[0]) } else { Biomes::Cells(cells) };
+        }
+        chunk
+    }
+
+    /// Synchronous generation (used when a chunk is needed right now).
+    pub fn ensure_generated(&mut self, cx: i32, cz: i32) -> bool {
+        if self.ensure(cx, cz) {
+            return true;
+        }
+        let Some(generator) = self.generator.clone() else { return false };
+        self.poll_generated();
+        if self.chunks.contains_key(&(cx, cz)) {
+            return true;
+        }
+        let g = generator.generate(cx, cz);
+        let chunk = self.assemble(g, cx, cz);
+        self.chunks.insert((cx, cz), chunk);
+        true
+    }
+
+    /// Whether the chunk is in memory or stored on disk (loading it in that case).
+    fn have(&mut self, cx: i32, cz: i32) -> bool {
+        self.chunks.contains_key(&(cx, cz)) || self.ensure(cx, cz)
+    }
+
+    /// Queues the background generation of a chunk that is not stored.
+    pub fn prefetch(&mut self, cx: i32, cz: i32) {
+        if self.generator.is_none() || self.have(cx, cz) {
+            return;
+        }
+        if let Some(pool) = self.pool.as_mut() {
+            pool.request(cx, cz);
+        }
+    }
+
+    /// Moves the chunks the worker threads finished into the world. Returns how many arrived.
+    pub fn poll_generated(&mut self) -> usize {
+        let Some(pool) = self.pool.as_mut() else { return 0 };
+        let done = pool.poll();
+        let n = done.len();
+        for (cx, cz, g) in done {
+            if self.chunks.contains_key(&(cx, cz)) {
+                continue; // generated synchronously in the meantime (and possibly edited)
+            }
+            let chunk = self.assemble(g, cx, cz);
+            self.chunks.insert((cx, cz), chunk);
+        }
+        n
+    }
+
+    /// Whether a chunk can be sent now: it and its eight neighbours (which the light engine reads) exist. Missing ones are queued.
+    pub fn ready_for_send(&mut self, cx: i32, cz: i32) -> bool {
+        if self.generator.is_none() {
+            return true;
+        }
+        let mut ready = true;
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                if !self.have(cx + dx, cz + dz) {
+                    self.prefetch(cx + dx, cz + dz);
+                    ready = false;
+                }
+            }
+        }
+        ready
+    }
+
+    /// Verification mode (`--check-terrain`, `tools/terrain_check.sh`): generates every chunk that is stored in a world of the vanilla server
+    /// and compares the blocks. Vanilla also carves caves and places features / structures, so the result is a sanity check of the generator
+    /// integration (seed, coordinates, heights), not an equality test: what differs must be air / water / ores / trees / ... only.
+    pub fn check_terrain(&mut self, radius: i32) -> bool {
+        let Some(generator) = self.generator.clone() else {
+            println!("This world has no noise generator");
+            return false;
+        };
+        let mut coords = Vec::new();
+        for cx in -radius..=radius {
+            for cz in -radius..=radius {
+                if self.ensure(cx, cz) {
+                    coords.push((cx, cz));
+                }
+            }
+        }
+        let (mut total, mut same) = (0u64, 0u64);
+        let (mut col_total, mut col_same_top) = (0u64, 0u64);
+        let mut pairs: HashMap<(u16, u16), u64> = HashMap::new();
+        let dim = self.dim;
+        for &(cx, cz) in &coords {
+            let g = generator.generate(cx, cz);
+            let chunk = self.loaded_chunk(cx, cz).unwrap();
+            for y in 0..dim.height as usize {
+                for z in 0..16usize {
+                    for x in 0..16usize {
+                        let vanilla = chunk.sections[y >> 4].get(x, y & 15, z);
+                        let ours = g.blocks[(y << 8) | (z << 4) | x];
+                        total += 1;
+                        if vanilla == ours {
+                            same += 1;
+                        } else {
+                            *pairs.entry((vanilla, ours)).or_default() += 1;
+                        }
+                    }
+                }
+            }
+            // the highest solid block of every column (below the trees): where terrain and surface agree, the generator is on the right track
+            for z in 0..16usize {
+                for x in 0..16usize {
+                    let top = |blocks: &dyn Fn(usize) -> u16| (0..dim.height as usize).rev().find(|&y| {
+                        let s = blocks(y);
+                        !self.palette.is_air(s) && !self.palette.has_fluid(s) && self.data.block_props.state(s as u32).is_some_and(|p| p.has(flag::BLOCKS_MOTION)) && !self.is_foliage(s)
+                    });
+                    let v = top(&|y| chunk.sections[y >> 4].get(x, y & 15, z));
+                    let o = top(&|y| g.blocks[(y << 8) | (z << 4) | x]);
+                    col_total += 1;
+                    col_same_top += (v == o) as u64;
+                }
+            }
+        }
+        let name = |s: u16| self.data.blocks.block_of_state(s as u32).map_or("?".to_owned(), |b| b.name.trim_start_matches("minecraft:").to_owned());
+        println!("terrain check: {} stored chunks of the vanilla server generated again", coords.len());
+        println!("  blocks identical: {same} of {total} ({:.2} %)", same as f64 * 100.0 / total.max(1) as f64);
+        println!("  columns whose highest solid non-foliage block is at the same height: {col_same_top} of {col_total} ({:.2} %)", col_same_top as f64 * 100.0 / col_total.max(1) as f64);
+        let mut by_name: HashMap<(String, String), u64> = HashMap::new();
+        for ((a, b), n) in pairs {
+            *by_name.entry((name(a), name(b))).or_default() += n;
+        }
+        let mut list: Vec<_> = by_name.into_iter().collect();
+        list.sort_by_key(|e| std::cmp::Reverse(e.1));
+        println!("  most frequent differences (vanilla -> Rust):");
+        for ((a, b), n) in list.iter().take(14) {
+            println!("    {n:9}  {a} -> {b}");
+        }
+        true
+    }
+
+    /// Leaves, logs and similar blocks that features place on top of the terrain.
+    fn is_foliage(&self, state: u16) -> bool {
+        let n = self.data.blocks.block_of_state(state as u32).map_or("", |b| b.name.as_str());
+        n.ends_with("_leaves") || n.ends_with("_log") || n.ends_with("_wood") || n.ends_with("_stem") || n.ends_with("_hyphae") || n.ends_with("vine") || n.contains("snow")
+    }
+
+    /// `MinecraftServer.setInitialSpawn`: the best climate spot of `Climate.Sampler.findSpawnPosition`, then the first suitable
+    /// column in a spiral of chunks around it.
+    fn initial_spawn(&mut self) -> (i32, i32, i32) {
+        let Some(generator) = self.generator.clone() else { return self.spawn };
+        let (sx, sz) = generator.find_spawn_position();
+        let (ccx, ccz) = (sx >> 4, sz >> 4);
+        let mut result = (ccx * 16 + 8, 64, ccz * 16 + 8);
+        let (mut dx, mut dz, mut ddx, mut ddz) = (0i32, 0i32, 0i32, -1i32);
+        for _ in 0..121 {
+            if (-5..=5).contains(&dx) && (-5..=5).contains(&dz) {
+                if let Some(p) = self.spawn_pos_in_chunk(ccx + dx, ccz + dz) {
+                    result = p;
+                    break;
+                }
+            }
+            if dx == dz || (dx < 0 && dx == -dz) || (dx > 0 && dx == 1 - dz) {
+                let t = ddx;
+                ddx = -ddz;
+                ddz = t;
+            }
+            dx += ddx;
+            dz += ddz;
+        }
+        result
+    }
+
+    /// `PlayerRespawnLogic.getSpawnPosInChunk`
+    fn spawn_pos_in_chunk(&mut self, cx: i32, cz: i32) -> Option<(i32, i32, i32)> {
+        for x in cx * 16..cx * 16 + 16 {
+            for z in cz * 16..cz * 16 + 16 {
+                if let Some(p) = self.respawn_pos(x, z) {
+                    return Some(p);
+                }
+            }
+        }
+        None
+    }
+
+    /// `PlayerRespawnLogic.getOverworldRespawnPos` for a dimension without a ceiling.
+    fn respawn_pos(&mut self, x: i32, z: i32) -> Option<(i32, i32, i32)> {
+        let (min_y, max_y) = (self.dim.min_y, self.dim.min_y + self.dim.height);
+        let data = self.data.clone();
+        let pal = self.palette.clone();
+        // heightmap values (`ChunkAccess.getHeight` = y of the highest matching block, min_y - 1 when there is none)
+        let top = |w: &mut World, matches: &dyn Fn(u16) -> bool| -> i32 {
+            let mut y = max_y - 1;
+            while y >= min_y && !matches(w.get_block(x, y, z)) {
+                y -= 1;
+            }
+            y
+        };
+        let blocks_motion = |s: u16| data.block_props.state(s as u32).is_some_and(|p| p.has(flag::BLOCKS_MOTION));
+        let motion_blocking = |s: u16| data.block_props.state(s as u32).is_some_and(|p| p.has(flag::BLOCKS_MOTION) || p.has(flag::FLUID));
+        let y = top(self, &motion_blocking);
+        if y < min_y {
+            return None;
+        }
+        let world_surface = top(self, &|s| !pal.is_air(s));
+        let ocean_floor = top(self, &blocks_motion);
+        if world_surface <= y && world_surface > ocean_floor {
+            return None;
+        }
+        let mut yy = y + 1;
+        while yy >= min_y {
+            let s = self.get_block(x, yy, z);
+            if pal.has_fluid(s) {
+                return None;
+            }
+            if top_face_full(data.block_props.collision_shape(s as u32)) {
+                return Some((x, yy + 1, z));
+            }
+            yy -= 1;
+        }
+        None
     }
 
     fn load_chunk(&mut self, cx: i32, cz: i32) -> Option<Chunk> {
@@ -756,7 +1087,7 @@ impl World {
     fn fallback_chunk(&self) -> &Chunk {
         match self.fallback {
             Fallback::Flat => &self.template,
-            Fallback::Void => &self.void,
+            Fallback::Void | Fallback::Generated => &self.void,
         }
     }
 
@@ -766,7 +1097,7 @@ impl World {
     }
 
     pub fn chunk(&mut self, cx: i32, cz: i32) -> &Chunk {
-        self.ensure(cx, cz);
+        self.ensure_generated(cx, cz);
         match self.chunks.get(&(cx, cz)) {
             Some(c) => c,
             None => self.fallback_chunk(),
@@ -811,7 +1142,7 @@ impl World {
             return None;
         }
         let key = (x >> 4, z >> 4);
-        if !self.ensure(key.0, key.1) {
+        if !self.ensure_generated(key.0, key.1) {
             let base = self.fallback_chunk().clone();
             self.chunks.insert(key, base);
             self.absent.remove(&key);
@@ -846,7 +1177,7 @@ impl World {
 
     /// A ready-to-send frame (compressed), cached per chunk.
     pub fn chunk_frame(&mut self, cx: i32, cz: i32, enc: &mut FrameEncoder) -> Arc<Vec<u8>> {
-        let real = self.ensure(cx, cz);
+        let real = self.ensure_generated(cx, cz);
         if real {
             if let Some(f) = self.chunks.get(&(cx, cz)).and_then(|c| c.cached.clone()) {
                 return f;
@@ -909,7 +1240,7 @@ impl World {
         let flat = self.fallback == Fallback::Flat;
         if !real {
             match self.fallback {
-                Fallback::Void => return computed_light(&self.void, &self.dim, &self.palette),
+                Fallback::Void | Fallback::Generated => return computed_light(&self.void, &self.dim, &self.palette),
                 Fallback::Flat => {
                     if let Some(l) = &self.template_light {
                         return l.clone();
@@ -917,9 +1248,13 @@ impl World {
                 }
             }
         }
-        for dx in -2..=2 {
-            for dz in -2..=2 {
-                self.ensure(cx + dx, cz + dz);
+        for dx in -2i32..=2 {
+            for dz in -2i32..=2 {
+                if dx.abs() <= 1 && dz.abs() <= 1 {
+                    self.ensure_generated(cx + dx, cz + dz);
+                } else {
+                    self.ensure(cx + dx, cz + dz);
+                }
             }
         }
         let engine = LightEngine::new(&self.data.block_props, &self.palette, self.dim);
@@ -1129,5 +1464,52 @@ mod tests {
         // a spawner whose only custom data would be SpawnPotentials has nothing left to send
         let only_potentials = Compound::new().with("id", Tag::string("minecraft:mob_spawner")).with("SpawnPotentials", Tag::List(vec![]));
         assert!(block_entity_update_tag("minecraft:mob_spawner", &only_potentials).is_none());
+    }
+}
+
+/// `Block.isFaceFull(shape, Direction.UP)`: the cross-section of the collision shape just below the top of the block covers the whole
+/// unit square. Shapes are boxes `[min_x, min_y, min_z, max_x, max_y, max_z]`.
+fn top_face_full(shape: &[[f64; 6]]) -> bool {
+    let rects: Vec<[f64; 4]> = shape.iter().filter(|b| b[1] <= 0.9999999 && b[4] >= 0.9999999).map(|b| [b[0], b[2], b[3], b[5]]).collect();
+    if rects.is_empty() {
+        return false;
+    }
+    let mut xs = vec![0.0, 1.0];
+    let mut zs = vec![0.0, 1.0];
+    for r in &rects {
+        xs.extend([r[0], r[2]]);
+        zs.extend([r[1], r[3]]);
+    }
+    xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    zs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    for w in xs.windows(2) {
+        for v in zs.windows(2) {
+            if w[1] - w[0] < 1e-9 || v[1] - v[0] < 1e-9 || w[0] < -1e-9 || w[1] > 1.0 + 1e-9 || v[0] < -1e-9 || v[1] > 1.0 + 1e-9 {
+                continue;
+            }
+            let (cx, cz) = ((w[0] + w[1]) / 2.0, (v[0] + v[1]) / 2.0);
+            if !rects.iter().any(|r| cx > r[0] && cx < r[2] && cz > r[1] && cz < r[3]) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+#[cfg(test)]
+mod worldgen_tests {
+    use super::top_face_full;
+
+    #[test]
+    fn top_face_of_collision_shapes() {
+        // a full block, a bottom slab (top at 0.5), a top slab, a fence post (narrow), stairs (a full top half-slab on one side only)
+        assert!(top_face_full(&[[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]]));
+        assert!(!top_face_full(&[[0.0, 0.0, 0.0, 1.0, 0.5, 1.0]]));
+        assert!(top_face_full(&[[0.0, 0.5, 0.0, 1.0, 1.0, 1.0]]));
+        assert!(!top_face_full(&[[0.375, 0.0, 0.375, 0.625, 1.5, 0.625]]));
+        assert!(!top_face_full(&[[0.0, 0.0, 0.0, 1.0, 0.5, 1.0], [0.0, 0.5, 0.0, 0.5, 1.0, 1.0]]));
+        // two boxes that together cover the top
+        assert!(top_face_full(&[[0.0, 0.0, 0.0, 0.5, 1.0, 1.0], [0.5, 0.0, 0.0, 1.0, 1.0, 1.0]]));
+        assert!(!top_face_full(&[]));
     }
 }

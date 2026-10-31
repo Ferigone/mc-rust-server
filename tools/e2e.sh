@@ -19,7 +19,7 @@ echo "### status";             "$BIN/mc-probe" status --port "$PORT"
 echo "### join (known packs)"; "$BIN/mc-probe" join --port "$PORT" --name Alice --data "$DATA" --secs 2 --chat "e2e" --dump "$RUN/known.bin" | tail -1
 echo "### join (full NBT)";   "$BIN/mc-probe" join --port "$PORT" --name Bob --data "$DATA" --secs 2 --no-known-packs --dump "$RUN/full.bin" | tail -1
 echo "### two players"
-"$BIN/mc-probe" join --port "$PORT" --name Carol --secs 4 --chat "dwa" --dump "$RUN/two.bin" >/dev/null &
+"$BIN/mc-probe" join --port "$PORT" --name Carol --secs 4 --chat "two" --dump "$RUN/two.bin" >/dev/null &
 sleep 1.2
 "$BIN/mc-probe" join --port "$PORT" --name Dave --secs 2 --walk >/dev/null
 wait %2 2>/dev/null || true

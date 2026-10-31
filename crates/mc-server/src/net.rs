@@ -60,7 +60,8 @@ pub struct JoinRequest {
 
 pub enum GameEvent {
     Join(Box<JoinRequest>),
-    Packet { session: u64, packet: Serverbound },
+    /// All play packets decoded from one network read, handed over atomically so a tick can never fall between them.
+    Packets { session: u64, packets: Vec<Serverbound> },
     Disconnected { session: u64, reason: String },
     Shutdown,
 }
@@ -232,7 +233,7 @@ fn valid_player_name(n: &str) -> bool {
 async fn login_and_play(mut c: Conn, addr: SocketAddr, shared: Arc<Shared>) -> Result<()> {
     let (id, body) = c.read_packet_timeout().await?;
     if id != ids::login::serverbound::HELLO {
-        bail!("oczekiwano login hello, jest {id}");
+        bail!("expected login hello, got {id}");
     }
     let hello = LoginHello::decode(&mut Reader::new(&body))?;
     if !valid_player_name(&hello.name) {
@@ -246,7 +247,7 @@ async fn login_and_play(mut c: Conn, addr: SocketAddr, shared: Arc<Shared>) -> R
         c.send(&packets::login_encryption_request("", &key.public_der, &challenge, true)).await?;
         let (id, body) = c.read_packet_timeout().await?;
         if id != ids::login::serverbound::KEY {
-            bail!("oczekiwano login key, jest {id}");
+            bail!("expected login key, got {id}");
         }
         let k = LoginKey::decode(&mut Reader::new(&body))?;
         let (secret, ok) = key.decrypt(&k.shared_secret, &k.challenge, &challenge)?;
@@ -297,7 +298,7 @@ async fn login_and_play(mut c: Conn, addr: SocketAddr, shared: Arc<Shared>) -> R
 
     let (id, _) = c.read_packet_timeout().await?;
     if id != ids::login::serverbound::LOGIN_ACKNOWLEDGED {
-        bail!("oczekiwano login_acknowledged, jest {id}");
+        bail!("expected login_acknowledged, got {id}");
     }
 
     let client_info = configuration(&mut c, &shared).await?;
@@ -407,17 +408,17 @@ async fn play(c: Conn, addr: SocketAddr, shared: Arc<Shared>, profile: GameProfi
         .map_err(|_| anyhow!("server is shutting down"))?;
 
     // Reader: decodes play packets and forwards them to the game thread.
+    let mut pending: Vec<Serverbound> = Vec::new();
     let reason = loop {
         match dec.next_packet() {
             Ok(Some((id, body))) => match decode_serverbound(id, &body) {
-                Ok(packet) => {
-                    if shared.events.send(GameEvent::Packet { session, packet }).is_err() {
-                        break "server closed".to_string();
-                    }
-                }
+                Ok(packet) => pending.push(packet),
                 Err(e) => break format!("packet decode error {id:#x}: {e}"),
             },
             Ok(None) => {
+                if !pending.is_empty() && shared.events.send(GameEvent::Packets { session, packets: std::mem::take(&mut pending) }).is_err() {
+                    break "server closed".to_string();
+                }
                 tokio::select! {
                     r = rd.read(&mut buf[..]) => match r {
                         Ok(0) => break "EOF".to_string(),
@@ -430,6 +431,9 @@ async fn play(c: Conn, addr: SocketAddr, shared: Arc<Shared>, profile: GameProfi
             Err(e) => break format!("frame error: {e}"),
         }
     };
+    if !pending.is_empty() {
+        let _ = shared.events.send(GameEvent::Packets { session, packets: pending });
+    }
     let _ = shared.events.send(GameEvent::Disconnected { session, reason });
     writer.abort();
     Ok(())

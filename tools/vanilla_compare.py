@@ -49,13 +49,17 @@ pv, pr = pk("vanilla", "join", "player_position")[0], pk("rust", "join", "player
 rec("identical after masking random fields", "play/player_position (without the random x,z)", pv[8:16] + pv[24:] == pr[8:16] + pr[24:])
 av, ar = mine("vanilla", "update_attributes", ev), mine("rust", "update_attributes", er)
 def attrset(b):
+    """{attribute id: (base value bytes, [(modifier id, amount bytes, operation)])} of one update_attributes packet."""
     r = b[0]; out = {}; i = 1
     for _ in range(r):
-        a, i = varint(b, i); out[a] = b[i:i+8]; i += 8; m, i = varint(b, i)
+        a, i = varint(b, i); base = b[i:i+8]; i += 8; m, i = varint(b, i); mods = []
         for _ in range(m):  # AttributeModifier: identifier (string), value (f64), operation (VarInt)
-            n, i = varint(b, i); i += n + 8; _op, i = varint(b, i)
+            n, i = varint(b, i); name = b[i:i+n]; i += n; amount = b[i:i+8]; i += 8; op, i = varint(b, i)
+            mods.append((name, amount, op))
+        out[a] = (base, sorted(mods))
     return out
-rec("semantically equal (order from a Java HashMap)", "play/update_attributes of the player (same attributes and values)", bool(av) and bool(ar) and attrset(av[0]) == attrset(ar[0]))
+rec("semantically equal (order from a Java HashMap)", "play/update_attributes of the player (same packets, attributes, values and modifiers)",
+    bool(av) and bool(ar) and [attrset(x) for x in av] == [attrset(x) for x in ar])
 
 # --- chunks
 def chunks(tag):
@@ -70,7 +74,7 @@ rec("byte-for-byte identical", "play/level_chunk_with_light (heightmaps, section
 
 # --- chat, commands
 def strip_ts(b):
-    k = b.index(b"witaj") + 5
+    k = b.index(b"hello") + 5
     return b[:k] + b[k+8:]
 rec("byte-for-byte identical", "chat: player_chat (except the server timestamp)", strip_ts(pk("vanilla", "chat", "player_chat")[0]) == strip_ts(pk("rust", "chat", "player_chat")[0]))
 rec("byte-for-byte identical", "unknown command: 2x system_chat (message + context)", pk("vanilla", "cmd", "system_chat") == pk("rust", "cmd", "system_chat"))

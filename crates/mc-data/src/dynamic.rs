@@ -3,7 +3,7 @@
 //! Entry order = vanilla loading order: `MultiPackResourceManager.listResources` returns
 //! a `TreeMap<ResourceLocation, ..>` keyed by the full file path (with prefix and `.json`),
 //! compared by path first, then by namespace. This determines entry IDs
-//! (np. ID biomu w chunkach, ID typu wymiaru w pakiecie Login).
+//! (e.g. the biome ID in chunks, the dimension type ID in the Login packet).
 
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -26,7 +26,7 @@ pub const SYNCHRONIZED_REGISTRIES: &[(&str, &str)] = &[
 
 #[derive(Debug, Clone)]
 pub struct DynamicEntry {
-    /// np. `minecraft:plains`
+    /// e.g. `minecraft:plains`
     pub id: String,
     /// JSON content from the data pack (complete, DIRECT codec).
     pub json: Value,

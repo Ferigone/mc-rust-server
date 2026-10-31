@@ -297,15 +297,27 @@ pub fn ticking_step(steps: i32) -> Vec<u8> {
 pub fn bundle_delimiter() -> Vec<u8> {
     payload(cb::BUNDLE_DELIMITER, |_| {})
 }
-/// `ClientboundUpdateAttributesPacket` without modifiers: (attribute registry id, base value).
-pub fn update_attributes(entity_id: i32, attributes: &[(i32, f64)]) -> Vec<u8> {
+/// One entry of `ClientboundUpdateAttributesPacket`: an attribute with its base value and its modifiers
+/// (resource location, amount; all with the operation `ADD_VALUE`).
+pub struct AttributeSnapshot<'a> {
+    pub id: i32,
+    pub base: f64,
+    pub modifiers: &'a [(&'a str, f64)],
+}
+
+pub fn update_attributes(entity_id: i32, attributes: &[AttributeSnapshot<'_>]) -> Vec<u8> {
     payload(cb::UPDATE_ATTRIBUTES, |w| {
         w.put_varint(entity_id);
         w.put_varint(attributes.len() as i32);
-        for (id, base) in attributes {
-            w.put_varint(*id);
-            w.put_f64(*base);
-            w.put_varint(0); // no modifiers
+        for a in attributes {
+            w.put_varint(a.id);
+            w.put_f64(a.base);
+            w.put_varint(a.modifiers.len() as i32);
+            for (name, amount) in a.modifiers {
+                w.put_string(name);
+                w.put_f64(*amount);
+                w.put_varint(0); // AttributeModifier.Operation.ADD_VALUE
+            }
         }
     })
 }
@@ -381,7 +393,7 @@ pub fn player_info_update(actions: u8, entries: &[PlayerInfoEntry<'_>]) -> Vec<u
                 }
             }
             if actions & a::INITIALIZE_CHAT != 0 {
-                w.put_bool(false); // brak sesji czatu
+                w.put_bool(false); // no chat session
             }
             if actions & a::UPDATE_GAME_MODE != 0 {
                 w.put_varint(e.game_mode);
@@ -588,6 +600,19 @@ pub fn section_blocks_update(sx: i32, sy: i32, sz: i32, changes: &[(u16, u32)]) 
 }
 
 /// `ContainerSetContent` z pustymi slotami (`ItemStack.EMPTY` = VarInt 0).
+/// `ContainerSetContent`: slot contents as (item id, count) and the item on the cursor.
+pub fn container_set_content(container_id: u8, state_id: i32, items: &[Option<(i32, i32)>], carried: Option<(i32, i32)>) -> Vec<u8> {
+    payload(cb::CONTAINER_SET_CONTENT, |w| {
+        w.put_u8(container_id);
+        w.put_varint(state_id);
+        w.put_varint(items.len() as i32);
+        for it in items {
+            put_item_stack(w, *it);
+        }
+        put_item_stack(w, carried);
+    })
+}
+
 pub fn container_set_content_empty(container_id: u8, state_id: i32, slots: usize) -> Vec<u8> {
     payload(cb::CONTAINER_SET_CONTENT, |w| {
         w.put_u8(container_id);
@@ -596,7 +621,7 @@ pub fn container_set_content_empty(container_id: u8, state_id: i32, slots: usize
         for _ in 0..slots {
             w.put_varint(0);
         }
-        w.put_varint(0); // przedmiot na kursorze
+        w.put_varint(0); // item on the cursor
     })
 }
 
@@ -606,7 +631,7 @@ pub fn player_chat_unsigned(sender: Uuid, index: i32, content: &str, timestamp_m
     payload(cb::PLAYER_CHAT, |w| {
         w.put_uuid(sender);
         w.put_varint(index);
-        w.put_bool(false); // brak sygnatury
+        w.put_bool(false); // no signature
         w.put_string(content); // SignedMessageBody.Packed.content (<=256)
         w.put_i64(timestamp_ms);
         w.put_i64(0); // salt

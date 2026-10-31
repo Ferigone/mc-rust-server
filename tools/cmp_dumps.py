@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compares two clientbound packet dumps from mc-probe (--dump): the vanilla server vs the Rust server.
 
-Zrzut: [stan u8][len u32 BE][VarInt id + body]; stany: 0 login, 1 config, 2 play.
+Dump format: [state u8][len u32 BE][VarInt id + body]; states: 0 login, 1 config, 2 play.
 Usage: cmp_dumps.py vanilla.bin rust.bin [--show NAME ...] [--hex]
 """
 import re, struct, sys, collections
@@ -49,7 +49,7 @@ for key in list(ca.keys()) + [k for k in cb if k not in ca]:
     la, lb = ca.get(key, []), cb.get(key, [])
     same = ""
     if la and lb:
-        same = "TAK (wszystkie)" if la == lb else ("pierwszy TAK" if la[0] == lb[0] else "NIE")
+        same = "YES (all)" if la == lb else ("first YES" if la[0] == lb[0] else "NO")
     mark = "  <-- missing in vanilla" if not la else ("  <-- missing in Rust" if not lb else "")
     print(f"{STATE[key[0]]+'/'+key[1]:45} {len(la):8} {len(lb):6}  {same}{mark}")
 

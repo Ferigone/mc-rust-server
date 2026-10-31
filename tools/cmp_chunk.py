@@ -63,9 +63,9 @@ if __name__ == "__main__":
     print("block entities:", a["be"], b["be"])
     for nme, i in (("sky_mask", 0), ("block_mask", 1), ("empty_sky_mask", 2), ("empty_block_mask", 3)):
         print(f"  {nme}: vanilla={bits(a['masks'][i])} rust={bits(b['masks'][i])}")
-    print("  tablice sky: vanilla", len(a["sky"]), "rust", len(b["sky"]), "| block: vanilla", len(a["blk"]), "rust", len(b["blk"]))
+    print("  sky arrays: vanilla", len(a["sky"]), "rust", len(b["sky"]), "| block: vanilla", len(a["blk"]), "rust", len(b["blk"]))
     ok = [all(x == b2 for x, b2 in zip(a["sky"], b["sky"]))] if a["sky"] and b["sky"] else []
-    print("  pierwsze tablice sky identyczne:", a["sky"][:1] == b["sky"][:1])
+    print("  first sky arrays identical:", a["sky"][:1] == b["sky"][:1])
     stats = {"hm": 0, "sec": 0, "masks": 0, "sky": 0}
     for key in common:
         x, y = cv[key], cr[key]

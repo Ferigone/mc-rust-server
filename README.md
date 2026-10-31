@@ -3,7 +3,7 @@
 A port of the **Minecraft: Java Edition 1.21 / 1.21.1** server (protocol **767**) to Rust. The goal is 1:1 behaviour
 with the vanilla server, so that an unmodified Java 1.21 client can connect and play.
 
-> **Status: milestone 1 of about 12 (see [docs/ROADMAP.md](docs/ROADMAP.md)).** This is a foundation, not a complete port.
+> **Status: milestone 2 of about 12 (see [docs/ROADMAP.md](docs/ROADMAP.md)).** This is a foundation, not a complete port.
 > Vanilla is ~4,000 classes and ~470,000 lines of code; this document states exactly what works and has been verified,
 > and what is still missing. It has not been tested with a real Minecraft client (none is available in the build
 > environment); it has been tested against Mojang's own decoders and in a differential test against the real vanilla
@@ -19,13 +19,14 @@ with the vanilla server, so that an unmodified Java 1.21 client can connect and 
 | Registries with full NBT for clients without a matching pack (e.g. 1.21 client vs 1.21.1 server) | ✅ |
 | Play: Login, position, chunk batches (`PlayerChunkSender` algorithm), chunk tracking view (`ChunkTrackingView`) | ✅ |
 | Keep-alive, chat (unsigned), `/list`, visibility and movement of other players (`ServerEntity.sendChanges`) | ✅ |
-| Block breaking/placing (simplified), superflat world, 20 TPS | ⚠️ simplified |
+| Block breaking/placing (simplified), 20 TPS | ⚠️ simplified |
+| **Worlds on disk**: Anvil regions (`.mca`, zlib/gzip/LZ4/uncompressed, external `.mcc`), `level.dat`, `playerdata/*.dat` (position, game mode, health, food, XP, inventory), stored heightmaps/light/block entities, `level-name`/`level-seed`, autosave, graceful save on Ctrl+C/SIGTERM | ✅ loads worlds of the vanilla server and writes worlds the vanilla server loads (see below) |
 | `server.properties` (same keys and defaults as vanilla) | ✅ read/write |
 
 ## What is still missing (honestly)
 
-Normal world generation, loading/saving Anvil worlds (`.mca`), `level.dat`, player data, a full light engine
-(only simplified sky light exists), non-player entities (mobs, items, AI), physics/collisions, inventory and crafting
+Normal world generation (chunks that are not stored in the region files are served empty; new worlds are superflat),
+a light engine (stored light is served as is; edited chunks are saved without light and relit by vanilla), non-player entities (mobs, items, AI), physics/collisions, inventory and crafting
 (recipes are sent empty), block behaviour (placement states, redstone, fluids), commands other than `/list`
 (and the command tree), ops/whitelist/bans, signed chat, advancements, scoreboards, Nether/End, RCON/query.
 Everything is itemised in [docs/ROADMAP.md](docs/ROADMAP.md).
@@ -36,7 +37,8 @@ Everything is itemised in [docs/ROADMAP.md](docs/ROADMAP.md).
 * In survival mode a block break on `STOP_DESTROY_BLOCK` is accepted without verifying the mining time.
 * A placed block gets its default state (no `getStateForPlacement`), item → block by name; collision with players is computed as a full cube.
 * No movement speed validation (anti-cheat) apart from rejecting NaN/infinity/out-of-world values.
-* No persistence: the world and inventories are empty after a restart; the spawn is fixed at (0.5, −60, 0.5).
+* A chunk edited by the Rust server is saved without its light and heightmaps and with `isLightOn=0` (vanilla relights it on load); nothing else of a chunk (entities, ticks, structures, POI) is changed or dropped.
+* Only the overworld is loaded; stored block/fluid ticks are kept but not executed yet (vanilla executes them right after loading: leaf decay, flowing water, ...).
 * The server brand is `vanilla`.
 
 ## Building and running
@@ -66,6 +68,8 @@ Mojang's servers onto the user's machine. Running the original server requires a
 | `tools/verify.sh` | Feeds a packet dump from the Rust server through the **real** Mojang codecs (see below). |
 | `tools/e2e.sh` | Starts the server and bots and runs the whole verification with one command. |
 | `tools/vanilla_compare.sh` | Differential test against the real vanilla server (requires `MC_EULA_ACCEPTED=true`). |
+| `tools/world_compare.sh`, `tools/world_compare.py` | World persistence test: vanilla generates a world, both servers load it and their chunk packets are compared; then the Rust server edits and saves the world and vanilla loads it (requires `MC_EULA_ACCEPTED=true`). |
+| `tools/dump_block_flags.sh` | Dumps per-state facts (air, fluid) from the real Mojang block classes; the `fluid_rule_matches_vanilla` test checks the Rust rule against all 26,684 states. |
 | `tools/cmp_dumps.py`, `tools/cmp_chunk.py` | Compare packet dumps / take a chunk apart piece by piece. |
 
 The field layout of every packet was reconstructed from the decompiled code (`net.minecraft.network.protocol.*`),
@@ -95,7 +99,9 @@ is not a comparison with terrain generation).
 `MC_EULA_ACCEPTED=true tools/vanilla_compare.sh` starts the **original vanilla 1.21.1 server** next to the Rust server
 (same seed, creative mode, flat world, offline), performs the same events with a bot and compares the packets.
 The script writes `eula=true` only when `MC_EULA_ACCEPTED=true` is set explicitly (the owner's acceptance of the Mojang EULA).
-Latest result: **36 / 36 matching**:
+Every test player starts at a fixed position from pre-seeded player data (both servers read it), and vanilla random ticks are
+disabled with `gamerule randomTickSpeed 0` (random ticks are block behaviour, M7), so the runs are deterministic: 5 of 5
+consecutive runs match. Latest result: **36 / 36 matching**:
 
 * **Byte-for-byte identical:** status JSON (key order measured on vanilla), compression, `game_profile`, brand,
   feature flags, known packs, **all 11 `registry_data` packets**, `finish_configuration`, difficulty, abilities,
@@ -118,6 +124,25 @@ The test found and fixed, among others: NBT key order (emulation of `java.util.H
 command error messages, numbers instead of strings in `/list`, light layer truncation (vanilla keeps them only up to the
 section above the highest non-empty one), section palette order, hashed seed (SHA-256), the dimension list, `ticking_*`,
 player attributes and the world border constant.
+
+## World persistence test (milestone 2)
+
+`MC_EULA_ACCEPTED=true tools/world_compare.sh`: the **real vanilla server** generates a world (seed 12345); then
+
+1. vanilla and the Rust server load copies of it and send their chunks to a bot: on a freshly generated world **all 109
+   chunks are identical byte for byte** (heightmaps, sections including palette order and the vanilla non-empty block
+   count quirk, block entities including their order, light masks and arrays);
+2. the Rust server breaks a block, shuts down on SIGTERM and saves; the **vanilla server loads the saved world without
+   errors**, places the player at the saved position, and exactly the edited block differs.
+
+Run against an older world (generated, then left running for a while), the remaining differences are all changes the vanilla
+server makes by itself after loading: scheduled block/fluid ticks (leaf decay distance, flowing water and lava) and light
+that spills in from chunks that only vanilla generates. Those belong to milestones M4/M5/M7.
+
+Quirks reproduced on the way: `LevelChunkSection.recalcBlockCounts` counts every block that holds a fluid twice
+(`nonEmptyBlockCount` can exceed 4096), `keepPacked` and data components are not part of a block entity's update tag,
+fastutil iteration order for block entities, `java.util.HashMap` order for NBT compounds, palette order of unchanged
+sections.
 
 ## Architecture
 

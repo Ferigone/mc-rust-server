@@ -125,7 +125,15 @@ impl Client {
         Ok(Self { rd, wr, dec: FrameDecoder::new(), enc: FrameEncoder::new(None), cipher: None, buf: vec![0; 65536], dump: None, state: 0 })
     }
     async fn send(&mut self, payload: &[u8]) -> Result<()> {
-        let mut f = self.enc.encode(payload);
+        self.send_many(&[payload.to_vec()]).await
+    }
+    /// Writes several packets with ONE write call, so the server reads them together and handles them in the same tick
+    /// (needed for deterministic "several actions in one tick" tests).
+    async fn send_many(&mut self, payloads: &[Vec<u8>]) -> Result<()> {
+        let mut f = Vec::new();
+        for p in payloads {
+            f.extend_from_slice(&self.enc.encode(p));
+        }
         if let Some(c) = &mut self.cipher {
             c.encrypt(&mut f);
         }
@@ -186,7 +194,7 @@ async fn status(a: &Args) -> Result<()> {
     Ok(())
 }
 
-// --------------------------------------------------------------- atrapa sesji
+// --------------------------------------------------------------- mock session server
 
 async fn mock_session(port: u16) -> Result<()> {
     // Minimal HTTP server: POST /join?username=&serverId= records the join, GET /?username=&serverId= returns the profile.
@@ -294,7 +302,7 @@ async fn join(a: &Args) -> Result<()> {
                 rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut secret);
                 let se = key.encrypt(&mut rand::thread_rng(), Pkcs1v15Encrypt, &secret)?;
                 let te = key.encrypt(&mut rand::thread_rng(), Pkcs1v15Encrypt, &challenge)?;
-                // „join" u dostawcy sesji (u Mojanga robi to launcher klienta)
+                // "join" at the session provider (with Mojang the client's launcher does this)
                 let hash = minecraft_hex_digest(&[server_id.as_bytes(), &secret, &pubkey]);
                 mock_join(&a.session_url, &a.name, &hash).await?;
                 c.send(&packets::LoginKey { shared_secret: se, challenge: te }.encode()).await?;
@@ -415,6 +423,8 @@ async fn join(a: &Args) -> Result<()> {
     let mut chat_sent = false;
     let mut cmd_sent = false;
     let mut world_actions_sent = false;
+    // The server is busy with join-time chunk work right after the first chunk; acting 1.5 s later makes tick alignment stable.
+    let mut world_actions_due: Option<std::time::Instant> = None;
     let mut pos = (0.0f64, 0.0f64, 0.0f64);
     let mut got_position = false;
     let mut walk_step = 0;
@@ -564,34 +574,36 @@ async fn join(a: &Args) -> Result<()> {
                 c.send(&mc_protocol::frame::payload(ids::play::serverbound::CHAT_COMMAND, |w| w.put_string(cmd))).await?;
             }
         }
-        if got_position && !world_actions_sent && id == pc::LEVEL_CHUNK_WITH_LIGHT {
+        if got_position && world_actions_due.is_none() && id == pc::LEVEL_CHUNK_WITH_LIGHT {
+            world_actions_due = Some(std::time::Instant::now() + std::time::Duration::from_millis(1500));
+        }
+        if got_position && !world_actions_sent && world_actions_due.is_some_and(|t| std::time::Instant::now() >= t) {
             world_actions_sent = true;
             use ids::play::serverbound as sbp;
             let below = (pos.0.floor() as i32, pos.1.floor() as i32 - 1, pos.2.floor() as i32);
+            let mut batch: Vec<Vec<u8>> = Vec::new();
             if let Some((x, y, z)) = a.brk.map(|p| p.unwrap_or(below)) {
                 // PlayerAction START_DESTROY_BLOCK (0), face UP (1), sequence 1
-                c.send(&mc_protocol::frame::payload(sbp::PLAYER_ACTION, |w| {
+                batch.push(mc_protocol::frame::payload(sbp::PLAYER_ACTION, |w| {
                     w.put_varint(0);
                     w.put_block_pos(x, y, z);
                     w.put_u8(1);
                     w.put_varint(1);
-                }))
-                .await?;
+                }));
             }
             // beside: the top face of the block next to the one under the feet, so the target position does not collide with the player
             let target = if a.place_beside { (below.0 + 1, below.1, below.2) } else { below };
             if let Some((x, y, z)) = a.place.map(|p| p.unwrap_or(target)) {
                 // stone (minecraft:stone) into slot 36 (hotbar 0) in creative mode, then UseItemOn on the top face
                 let stone = 1; // item ID of stone from the minecraft:item registry
-                c.send(&mc_protocol::frame::payload(sbp::SET_CREATIVE_MODE_SLOT, |w| {
+                batch.push(mc_protocol::frame::payload(sbp::SET_CREATIVE_MODE_SLOT, |w| {
                     w.put_i16(36);
                     w.put_varint(1);
                     w.put_varint(stone);
                     w.put_varint(0);
                     w.put_varint(0);
-                }))
-                .await?;
-                c.send(&mc_protocol::frame::payload(sbp::USE_ITEM_ON, |w| {
+                }));
+                batch.push(mc_protocol::frame::payload(sbp::USE_ITEM_ON, |w| {
                     w.put_varint(0);
                     w.put_block_pos(x, y, z);
                     w.put_varint(1);
@@ -600,9 +612,9 @@ async fn join(a: &Args) -> Result<()> {
                     w.put_f32(0.5);
                     w.put_bool(false);
                     w.put_varint(2);
-                }))
-                .await?;
+                }));
             }
+            c.send_many(&batch).await?;
         }
         if a.walk && got_position && walk_step < 40 && id == pc::LEVEL_CHUNK_WITH_LIGHT {
             walk_step += 1;

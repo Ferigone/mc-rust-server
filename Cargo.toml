@@ -19,6 +19,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v3"] }
 md-5 = "0.10"
+sha2 = "0.10"
 sha1 = "0.10"
 aes = "0.8"
 cfb8 = "0.8"

@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 md-5.workspace = true
+sha2.workspace = true
 anyhow.workspace = true
 serde_json.workspace = true
 mc-data.workspace = true

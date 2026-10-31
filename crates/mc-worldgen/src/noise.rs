@@ -2,7 +2,7 @@
 //! `SimplexNoise` and `BlendedNoise`. Floating point operations keep the order of the Java code so results are bit-identical.
 
 use crate::mth::{self, clamped_lerp, lerp2, lerp3, smoothstep, smoothstep_derivative};
-use crate::random::{RandomSource, XoroshiroRandomSource};
+use crate::random::{LegacyRandomSource, RandomSource, XoroshiroRandomSource};
 
 /// `SimplexNoise.GRADIENT`
 pub const GRADIENT: [[i32; 3]; 16] = [
@@ -526,5 +526,74 @@ impl BlendedNoise {
             scale /= 2.0;
         }
         clamped_lerp(min_v / 512.0, max_v / 512.0, t) / 128.0
+    }
+}
+
+/// `PerlinSimplexNoise`: octaves of 2D simplex noise (used for the temperature noise of the biomes)
+pub struct PerlinSimplexNoise {
+    levels: Vec<Option<SimplexNoise>>,
+    highest_freq_value_factor: f64,
+    highest_freq_input_factor: f64,
+}
+
+impl PerlinSimplexNoise {
+    /// `octaves` are the (distinct) octave numbers, e.g. `[-2, -1, 0]`.
+    pub fn new(random: &mut dyn RandomSource, octaves: &[i32]) -> Self {
+        let mut set: Vec<i32> = octaves.to_vec();
+        set.sort_unstable();
+        set.dedup();
+        assert!(!set.is_empty(), "Need some octaves!");
+        let first = -set[0];
+        let last = *set.last().unwrap();
+        let total = first + last + 1;
+        assert!(total >= 1, "Total number of octaves needs to be >= 1");
+        let base = SimplexNoise::new(random);
+        let mut levels: Vec<Option<SimplexNoise>> = (0..total).map(|_| None).collect();
+        let mut base_slot = None;
+        if last >= 0 && last < total && set.contains(&0) {
+            base_slot = Some(last as usize);
+        }
+        for i in (last + 1)..total {
+            if i >= 0 && set.contains(&(last - i)) {
+                levels[i as usize] = Some(SimplexNoise::new(random));
+            } else {
+                random.consume_count(262);
+            }
+        }
+        if last > 0 {
+            let seed = (base.get_value_3d(base.xo, base.yo, base.zo) * (9.223372E18f32 as f64)) as i64;
+            let mut r = LegacyRandomSource::new(seed);
+            for i in (0..last).rev() {
+                if i < total && set.contains(&(last - i)) {
+                    levels[i as usize] = Some(SimplexNoise::new(&mut r));
+                } else {
+                    r.consume_count(262);
+                }
+            }
+        }
+        if let Some(slot) = base_slot {
+            levels[slot] = Some(base);
+        }
+        Self {
+            levels,
+            highest_freq_input_factor: 2f64.powi(last),
+            highest_freq_value_factor: 1.0 / (2f64.powi(total) - 1.0),
+        }
+    }
+
+    /// `getValue(x, y, useNoiseOffsets)`
+    pub fn get_value(&self, x: f64, y: f64, use_offsets: bool) -> f64 {
+        let mut sum = 0.0;
+        let mut input = self.highest_freq_input_factor;
+        let mut value = self.highest_freq_value_factor;
+        for level in &self.levels {
+            if let Some(n) = level {
+                let (ox, oy) = if use_offsets { (n.xo, n.yo) } else { (0.0, 0.0) };
+                sum += n.get_value_2d(x * input + ox, y * input + oy) * value;
+            }
+            input /= 2.0;
+            value *= 2.0;
+        }
+        sum
     }
 }

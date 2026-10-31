@@ -3,7 +3,7 @@
 A port of the **Minecraft: Java Edition 1.21 / 1.21.1** server (protocol **767**) to Rust. The goal is 1:1 behaviour
 with the vanilla server, so that an unmodified Java 1.21 client can connect and play.
 
-> **Status: milestone 3 of about 12 (see [docs/ROADMAP.md](docs/ROADMAP.md)).** This is a foundation, not a complete port.
+> **Status: milestone 4 of about 12 (see [docs/ROADMAP.md](docs/ROADMAP.md)).** This is a foundation, not a complete port.
 > Vanilla is ~4,000 classes and ~470,000 lines of code; this document states exactly what works and has been verified,
 > and what is still missing. It has not been tested with a real Minecraft client (none is available in the build
 > environment); it has been tested against Mojang's own decoders and in a differential test against the real vanilla
@@ -20,6 +20,7 @@ with the vanilla server, so that an unmodified Java 1.21 client can connect and 
 | Play: Login, position, chunk batches (`PlayerChunkSender` algorithm), chunk tracking view (`ChunkTrackingView`) | ✅ |
 | Keep-alive, chat (unsigned), `/list`, visibility and movement of other players (`ServerEntity.sendChanges`) | ✅ |
 | Block breaking/placing (simplified), 20 TPS | ⚠️ simplified |
+| **Light engine** (block + sky light, section storage rules, face-shape occlusion) and real heightmaps for generated / edited chunks | ✅ identical to the vanilla server on every stored layer of a vanilla-generated world (see below); incremental `light_update` packets after edits: not yet |
 | Block placement uses the real item→block mapping, replaceable blocks, and the real collision shapes against player hitboxes | ✅ (default block state only until `getStateForPlacement`, M7) |
 | **Worlds on disk**: Anvil regions (`.mca`, zlib/gzip/LZ4/uncompressed, external `.mcc`), `level.dat`, `playerdata/*.dat` (position, game mode, health, food, XP, inventory), stored heightmaps/light/block entities, `level-name`/`level-seed`, autosave, graceful save on Ctrl+C/SIGTERM | ✅ loads worlds of the vanilla server and writes worlds the vanilla server loads (see below) |
 | `server.properties` (same keys and defaults as vanilla) | ✅ read/write |
@@ -27,7 +28,7 @@ with the vanilla server, so that an unmodified Java 1.21 client can connect and 
 ## What is still missing (honestly)
 
 Normal world generation (chunks that are not stored in the region files are served empty; new worlds are superflat),
-a light engine (stored light is served as is; edited chunks are saved without light and relit by vanilla), non-player entities (mobs, items, AI), physics/collisions, inventory and crafting
+`light_update` packets after block edits (edited chunks are saved without light and relit by vanilla), non-player entities (mobs, items, AI), physics/collisions, inventory and crafting
 (recipes are sent empty), block behaviour (placement states, redstone, fluids), commands other than `/list`
 (and the command tree), ops/whitelist/bans, signed chat, advancements, scoreboards, Nether/End, RCON/query.
 Everything is itemised in [docs/ROADMAP.md](docs/ROADMAP.md).
@@ -38,7 +39,7 @@ Everything is itemised in [docs/ROADMAP.md](docs/ROADMAP.md).
 * In survival mode a block break on `STOP_DESTROY_BLOCK` is accepted without verifying the mining time.
 * A placed block gets its default state (no `getStateForPlacement`, no `canSurvive`); only players are checked for collision (other entities: M6).
 * No movement speed validation (anti-cheat) apart from rejecting NaN/infinity/out-of-world values.
-* A chunk edited by the Rust server is saved without its light and heightmaps and with `isLightOn=0` (vanilla relights it on load); nothing else of a chunk (entities, ticks, structures, POI) is changed or dropped.
+* A chunk edited by the Rust server is saved without its light and heightmaps and with `isLightOn=0` (vanilla relights it on load); nothing else of a chunk (entities, ticks, structures, POI) is changed or dropped. Clients get no `light_update` packets after a block edit yet (they update their own light locally); chunks sent afterwards have the correct light.
 * Only the overworld is loaded; stored block/fluid ticks are kept but not executed yet (vanilla executes them right after loading: leaf decay, flowing water, ...).
 * The server brand is `vanilla`.
 
@@ -71,6 +72,7 @@ Mojang's servers onto the user's machine. Running the original server requires a
 | `tools/vanilla_compare.sh` | Differential test against the real vanilla server (requires `MC_EULA_ACCEPTED=true`). |
 | `tools/world_compare.sh`, `tools/world_compare.py` | World persistence test: vanilla generates a world, both servers load it and their chunk packets are compared; then the Rust server edits and saves the world and vanilla loads it (requires `MC_EULA_ACCEPTED=true`). |
 | `tools/remap.sh` | Produces `server-named.jar`, the vanilla server with Mojang's official names (shared by the tools below). |
+| `tools/light_check.sh` | Recomputes the light of every chunk of a vanilla-generated world and compares it with the light vanilla stored (also `mc-server --check-light`). |
 | `tools/dump_props.sh` | Runs the **real** block and item classes and dumps per-state facts (hardness, blast resistance, light emission / opacity, collision / outline / occlusion shapes, 18 flags such as `isAir`, "holds a fluid", replaceable) and per-item facts (stack size, durability, placed block) into `reference/gen/generated/reports/{block_props,item_props}.tsv`. Run by `tools/fetch_reference.sh`. |
 | `tools/cmp_dumps.py`, `tools/cmp_chunk.py` | Compare packet dumps / take a chunk apart piece by piece. |
 
@@ -140,6 +142,22 @@ player attributes and the world border constant.
 Run against an older world (generated, then left running for a while), the remaining differences are all changes the vanilla
 server makes by itself after loading: scheduled block/fluid ticks (leaf decay distance, flowing water and lava) and light
 that spills in from chunks that only vanilla generates. Those belong to milestones M4/M5/M7.
+
+## Light engine test (milestone 4)
+
+`mc-server --check-light` (`tools/light_check.sh`) recomputes block and sky light for every chunk of a vanilla-generated world
+that has all eight neighbours stored and compares it with the arrays vanilla stored: **225 / 225 chunks, all 11,700 layers
+identical** (8.5 ms per chunk in a release build). 12 further sky layers exist only in the live vanilla engine, not in the
+files, because a neighbouring chunk was generated after the chunk was saved; the captured vanilla packets contain exactly
+those layers (all 15). `tools/world_compare.sh` additionally serves a world saved by the Rust server with both servers: the edited
+chunk has no stored light, vanilla relights it, the Rust engine computes it, and **all 109 chunks are identical, light included**.
+`tools/vanilla_compare.sh`: all superflat chunks (now lit by the engine) stay byte-identical.
+
+The engine implements the fixpoint of the vanilla engine instead of its incremental queues: light is stored in a section when
+the section or any of its 26 neighbours is non-empty, a lit cell gives its neighbour `level - max(1, lightBlock)` unless the
+face shapes occlude, block light starts at the emission of every block, sky light at the cells at or above each column's
+lowest sky source (`ChunkSkyLightSources`). Vanilla quirk reproduced: a chunk stored without light is relit from its own
+emitters only, so light spilling in from the emitters of lit neighbours is missing there.
 
 Quirks reproduced on the way: `LevelChunkSection.recalcBlockCounts` counts every block that holds a fluid twice
 (`nonEmptyBlockCount` can exceed 4096), `keepPacked` and data components are not part of a block entity's update tag,

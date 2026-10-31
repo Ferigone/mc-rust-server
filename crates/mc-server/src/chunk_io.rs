@@ -35,6 +35,12 @@ pub fn chunk_from_nbt(nbt: &Compound, dim: &Dimension, pal: &Palette, data: &Gam
         let Some(sec) = sec.as_compound() else { continue };
         let idx = sec.get_i64("Y").unwrap_or(i64::MIN) as i32 - min_section;
         if idx < 0 || idx as usize >= chunk.sections.len() {
+            // a light-only section just below / above the world
+            let sky = sec.get_byte_array("SkyLight").and_then(|a| zero_or_none(a));
+            let block = sec.get_byte_array("BlockLight").and_then(|a| zero_or_none(a));
+            if sky.is_some() || block.is_some() {
+                chunk.edge_light.push((idx + min_section, sky, block));
+            }
             continue;
         }
         let s = &mut chunk.sections[idx as usize];
@@ -107,6 +113,7 @@ pub fn chunk_from_nbt(nbt: &Compound, dim: &Dimension, pal: &Palette, data: &Gam
         }
     }
     chunk.stored_light = nbt.get_bool("isLightOn").unwrap_or(false);
+    chunk.relit = !chunk.stored_light;
     let mut raw = nbt.clone();
     raw.remove("sections");
     chunk.raw = Some(raw);

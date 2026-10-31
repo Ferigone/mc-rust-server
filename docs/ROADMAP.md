@@ -48,7 +48,7 @@ tables at start (`mc-data::props`) and a test checks known values of the real cl
 block, replaceable blocks, collision shapes vs. player hitboxes — differential test with a torch and a pressure plate). Still to come
 with their stages: full default component maps (M8), tool speeds and survival mining timings (M7/M8).
 
-**M4 — Light engine.** Port of `world/level/lighting` (sky/block light BFS, `DataLayer`), full heightmaps
+**M4 ✅ Light engine** (block and sky light, heightmap types; `tools/light_check.sh`). Still open from this stage: incremental updates and `light_update` packets after block edits, `propagateFromEmptySections` (floating islands), multithreaded lighting. Port of `world/level/lighting` (sky/block light BFS, `DataLayer`), full heightmaps
 (`MOTION_BLOCKING`, `OCEAN_FLOOR`, …) instead of the simplified ones. Replaces the simplified sky light.
 
 **M5 — World generation** (the biggest seed-parity risk). Random number generators (`LegacyRandomSource`,

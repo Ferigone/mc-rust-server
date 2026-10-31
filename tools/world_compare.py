@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compares what the REAL vanilla server and the Rust server send for the same Anvil world (level_chunk_with_light).
 
-Usage: world_compare.py <vanilla.bin> <rust.bin> [--after <vanilla_after_edit.bin> <x,y,z>]
+Usage: world_compare.py <vanilla.bin> <rust.bin> [--after <vanilla_after_edit.bin> <x,y,z> [--after-rust <rust_after_edit.bin>]]
 
 Dumps come from `mc-probe join --dump`. Checks, for every chunk both servers sent:
   * heightmaps, block entities (type, position, NBT bytes, order) and the section structure must be identical,
@@ -10,6 +10,8 @@ Dumps come from `mc-probe join --dump`. Checks, for every chunk both servers sen
   * light data is only reported (it depends on neighbouring chunks that the Rust server cannot generate yet).
 With --after: the world saved by the Rust server after breaking <x,y,z> was loaded by vanilla; exactly that block (and
 nothing else besides vanilla's own tick noise) may differ from the original vanilla view.
+With --after-rust: the Rust server serves the world it saved itself (the edited chunk has no stored light, so vanilla relights it
+and the Rust server runs its light engine); every chunk both servers send must be identical, light included.
 Exit code 1 when a hard check fails.
 """
 import collections, json, os, struct, sys
@@ -121,6 +123,9 @@ def diff_blocks(a, b, k):
 def main():
     args = [a for a in sys.argv[1:]]
     after = None
+    after_rust = None
+    if "--after-rust" in args:
+        i = args.index("--after-rust"); after_rust = args[i + 1]; del args[i:i + 2]
     if "--after" in args:
         i = args.index("--after"); after = (args[i + 1], tuple(int(v) for v in args[i + 2].split(","))); del args[i:i + 3]
     van, rus = chunks(args[0]), chunks(args[1])
@@ -160,6 +165,17 @@ def main():
         be = van[k]["be"] == aft[k]["be"]
         print(f"edit check: block entities of the edited chunk identical: {be}")
         hard += not be
+    if after and after_rust:
+        av, ar = chunks(after[0]), chunks(after_rust)
+        common2 = sorted(set(av) & set(ar))
+        what = {"sections": "sec", "heightmaps": "hm", "block entities": "be", "light (masks + arrays)": "light"}
+        res = {name: sum(1 for k in common2 if av[k][key] == ar[k][key]) for name, key in what.items()}
+        print("saved world served by both servers: " + ", ".join(f"{name} identical {n}/{len(common2)}" for name, n in res.items()))
+        for name, key in what.items():
+            bad = [k for k in common2 if av[k][key] != ar[k][key]]
+            if bad:
+                hard += len(bad)
+                print(f"  DIFFERENT {name} in chunks {bad[:6]}")
     print("RESULT:", "FAIL (%d hard differences)" % hard if hard else "OK")
     sys.exit(1 if hard else 0)
 

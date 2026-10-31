@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Test end-to-end: uruchamia serwer Rust, łączy botów (mc-probe) i weryfikuje zrzuty pakietów
-# PRAWDZIWYMI dekoderami Mojang (wymaga: tools/fetch_reference.sh + tools/decompile.sh).
+# End-to-end test: starts the Rust server, connects bots (mc-probe) and verifies the packet dumps
+# with the REAL Mojang decoders (requires: tools/fetch_reference.sh + tools/decompile.sh).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -17,8 +17,8 @@ for _ in $(seq 1 80); do (echo > "/dev/tcp/127.0.0.1/$PORT") 2>/dev/null && brea
 
 echo "### status";             "$BIN/mc-probe" status --port "$PORT"
 echo "### join (known packs)"; "$BIN/mc-probe" join --port "$PORT" --name Alice --data "$DATA" --secs 2 --chat "e2e" --dump "$RUN/known.bin" | tail -1
-echo "### join (pełny NBT)";   "$BIN/mc-probe" join --port "$PORT" --name Bob --data "$DATA" --secs 2 --no-known-packs --dump "$RUN/full.bin" | tail -1
-echo "### dwóch graczy"
+echo "### join (full NBT)";   "$BIN/mc-probe" join --port "$PORT" --name Bob --data "$DATA" --secs 2 --no-known-packs --dump "$RUN/full.bin" | tail -1
+echo "### two players"
 "$BIN/mc-probe" join --port "$PORT" --name Carol --secs 4 --chat "dwa" --dump "$RUN/two.bin" >/dev/null &
 sleep 1.2
 "$BIN/mc-probe" join --port "$PORT" --name Dave --secs 2 --walk >/dev/null
@@ -27,11 +27,11 @@ sleep 3
 
 if [ -f "$ROOT/reference/work/server-named.jar" ]; then
   for f in known:known full:full two:known; do
-    echo "### weryfikacja prawdziwymi dekoderami Mojang: ${f%%:*}"
+    echo "### verification with the real Mojang decoders: ${f%%:*}"
     mode=""; [ "${f##*:}" = full ] && mode=full
-    "$ROOT/tools/verify.sh" "$RUN/${f%%:*}.bin" $mode | sed 's/^\[[0-9:]*\] \[main\/INFO\]: \[STDOUT\]: //' | grep -E "BŁĄD|WYNIK" || true
+    "$ROOT/tools/verify.sh" "$RUN/${f%%:*}.bin" $mode | sed 's/^\[[0-9:]*\] \[main\/INFO\]: \[STDOUT\]: //' | grep -E "FAIL|RESULT" || true
   done
 else
-  echo "(pominięto weryfikację Mojang: uruchom tools/decompile.sh)"
+  echo "(skipped Mojang verification: run tools/decompile.sh)"
 fi
 echo "### OK"

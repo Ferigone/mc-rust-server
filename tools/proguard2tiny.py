@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Konwertuje oficjalne mapowania Mojang (format ProGuard, named -> obf) do Tiny v2 (official -> named).
+"""Converts the official Mojang mappings (ProGuard format, named -> obf) to Tiny v2 (official -> named).
 
-Użycie: proguard2tiny.py server_mappings.txt out.tiny
-Tiny-remapper potrzebuje deskryptorów w przestrzeni nazw źródłowej ("official" = obfuskowane),
-więc nazwy klas w deskryptorach tłumaczymy named -> obf.
+Usage: proguard2tiny.py server_mappings.txt out.tiny
+tiny-remapper needs descriptors in the source namespace ("official" = obfuscated),
+so class names in descriptors are translated named -> obf.
 """
 import re
 import sys

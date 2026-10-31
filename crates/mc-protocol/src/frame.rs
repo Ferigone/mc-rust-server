@@ -1,8 +1,8 @@
-//! Ramkowanie pakietów: długość VarInt, opcjonalna kompresja zlib i szyfrowanie AES-128-CFB8.
+//! Packet framing: VarInt length, optional zlib compression and AES-128-CFB8 encryption.
 //!
-//! Ramka (bez kompresji):  VarInt(len) | VarInt(id) | body
-//! Ramka (z kompresją):    VarInt(packet_len) | VarInt(data_len) | dane
-//!                         data_len == 0 -> dane niezkompresowane (poniżej progu)
+//! Frame (no compression):   VarInt(len) | VarInt(id) | body
+//! Frame (compression):      VarInt(packet_len) | VarInt(data_len) | data
+//!                           data_len == 0 -> uncompressed data (below the threshold)
 
 use crate::buf::{Put, Reader};
 use crate::error::{Error, Result};
@@ -10,15 +10,15 @@ use aes::Aes128;
 use cfb8::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit};
 use flate2::{Compress, Compression, Decompress, FlushCompress, FlushDecompress, Status};
 
-/// Maksymalny rozmiar pakietu po dekompresji (vanilla: 8 MiB dla serverbound).
+/// Maximum packet size after decompression (vanilla: 8 MiB for serverbound).
 pub const MAX_UNCOMPRESSED: usize = 8 * 1024 * 1024;
-/// Maksymalny rozmiar ramki na drucie (3-bajtowy VarInt, jak w vanilla).
+/// Maximum frame size on the wire (3-byte VarInt, like vanilla).
 pub const MAX_FRAME: usize = 2_097_151;
 
 type Dec = cfb8::Decryptor<Aes128>;
 type Enc = cfb8::Encryptor<Aes128>;
 
-/// Dekoder strumienia: dostaje surowe bajty z gniazda, oddaje kompletne pakiety `(id, body)`.
+/// Stream decoder: takes raw bytes from the socket and yields complete `(id, body)` packets.
 pub struct FrameDecoder {
     buf: Vec<u8>,
     start: usize,
@@ -39,7 +39,7 @@ impl FrameDecoder {
     }
 
     pub fn enable_encryption(&mut self, key: &[u8; 16]) {
-        // Uwaga: bajty już zbuforowane są jawne; włączenie następuje między pakietami.
+        // Note: bytes already buffered are plain text; encryption is enabled between packets.
         self.cipher = Some(Dec::new(key.into(), key.into()));
     }
 
@@ -47,7 +47,7 @@ impl FrameDecoder {
         self.threshold = if threshold >= 0 { Some(threshold) } else { None };
     }
 
-    /// Dopisuje świeże bajty z gniazda (odszyfrowuje je, jeśli szyfrowanie jest włączone).
+    /// Appends fresh bytes from the socket (decrypting them if encryption is enabled).
     pub fn feed(&mut self, data: &[u8]) {
         if self.start > 0 && self.start == self.buf.len() {
             self.buf.clear();
@@ -65,10 +65,10 @@ impl FrameDecoder {
         }
     }
 
-    /// Próbuje wyciągnąć kolejny kompletny pakiet. `Ok(None)` = potrzeba więcej danych.
+    /// Tries to extract the next complete packet. `Ok(None)` = more data is needed.
     pub fn next_packet(&mut self) -> Result<Option<(i32, Vec<u8>)>> {
         let avail = &self.buf[self.start..];
-        // Długość ramki
+        // Frame length
         let mut r = Reader::new(avail);
         let len = match r.varint() {
             Ok(l) => l,
@@ -93,7 +93,7 @@ impl FrameDecoder {
                 if data_len < 0 || data_len as usize > MAX_UNCOMPRESSED {
                     return Err(Error::TooLarge(data_len.max(0) as usize));
                 }
-                // Jedno wywołanie z limitem = deklarowany rozmiar (+1, by wykryć nadmiar): odporność na zip-bomby.
+                // A single call limited to the declared size (+1 to detect overflow): resistant to zip bombs.
                 let mut out = Vec::with_capacity(data_len as usize + 1);
                 self.inflater.reset(true);
                 let status = self
@@ -122,9 +122,9 @@ impl FrameDecoder {
     }
 }
 
-/// Koder: z ładunku (`VarInt(id) | body`) buduje ramkę gotową do wysłania.
-/// Kompresja jest niezależna od połączenia (próg globalny), więc ramki można współdzielić
-/// między graczami; szyfrowanie robi dopiero writer konkretnego połączenia.
+/// Encoder: builds a ready-to-send frame from a payload (`VarInt(id) | body`).
+/// Compression is independent of the connection (global threshold), so frames can be shared
+/// between players; encryption is done only by the writer of a particular connection.
 pub struct FrameEncoder {
     threshold: Option<i32>,
     deflater: Compress,
@@ -146,7 +146,7 @@ impl FrameEncoder {
         self.threshold
     }
 
-    /// Dodaje ramkę dla `payload` (id+body) na koniec `out`.
+    /// Appends a frame for `payload` (id+body) to `out`.
     pub fn encode_into(&mut self, payload: &[u8], out: &mut Vec<u8>) {
         match self.threshold {
             None => {
@@ -189,7 +189,7 @@ impl FrameEncoder {
     }
 }
 
-/// Szyfrator wychodzący AES-128-CFB8 (stan zachowany między zapisami).
+/// Outgoing AES-128-CFB8 encryptor (state is kept between writes).
 pub struct Encryptor(Enc);
 
 impl Encryptor {
@@ -203,7 +203,7 @@ impl Encryptor {
     }
 }
 
-/// Buduje ładunek pakietu: `VarInt(id) | body`.
+/// Builds a packet payload: `VarInt(id) | body`.
 pub fn payload(id: i32, body: impl FnOnce(&mut Vec<u8>)) -> Vec<u8> {
     let mut v = Vec::with_capacity(64);
     v.put_varint(id);
@@ -224,7 +224,7 @@ mod tests {
         let body: Vec<u8> = (0..n).map(|i| (i % 7) as u8).collect();
         let p = payload(0x27, |w| w.extend_from_slice(&body));
         let frame = enc.encode(&p);
-        // podaj bajt po bajcie, żeby sprawdzić ramkowanie częściowe
+        // feed it in tiny chunks to exercise partial-frame handling
         let mut got = None;
         for chunk in frame.chunks(3) {
             dec.feed(chunk);

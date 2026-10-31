@@ -1,12 +1,12 @@
-//! mc-probe: bot protokołu do testów zgodności.
+//! mc-probe: a protocol bot for conformance tests.
 //!
 //!   mc-probe status [--host H] [--port P]
 //!   mc-probe join   [--host H] [--port P] [--name N] [--data DIR] [--secs S] [--no-known-packs]
 //!                   [--chat TEXT] [--walk] [--online] [--session-url URL]
-//!   mc-probe mock-session [--port P]     (atrapa sessionserver.mojang.com do testów online-mode)
+//!   mc-probe mock-session [--port P]     (a mock of sessionserver.mojang.com for online-mode tests)
 //!
-//! Probe ma własny parser chunków (niezależny od kodu serwera) i weryfikuje ID bloków względem
-//! OFICJALNEGO raportu Mojang (`blocks.json`), a nie względem kodu serwera.
+//! The probe has its own chunk parser (independent of the server code) and verifies block IDs against
+//! the OFFICIAL Mojang report (`blocks.json`), not against the server code.
 
 use anyhow::{anyhow, bail, Result};
 use mc_protocol::frame::{Encryptor, FrameDecoder, FrameEncoder};
@@ -42,12 +42,12 @@ struct Args {
 fn parse_pos(s: &str) -> Result<(i32, i32, i32)> {
     let v: Vec<i32> = s.split(',').map(|x| x.trim().parse()).collect::<Result<_, _>>()?;
     if v.len() != 3 {
-        bail!("pozycja ma postać x,y,z");
+        bail!("a position has the form x,y,z");
     }
     Ok((v[0], v[1], v[2]))
 }
 
-/// `below` = blok bezpośrednio pod stopami gracza (rozwiązywany po otrzymaniu pozycji z serwera).
+/// `below` = the block directly under the player's feet (resolved after the position arrives from the server).
 fn parse_pos_or_below(s: &str) -> Result<Option<(i32, i32, i32)>> {
     if s == "below" || s == "beside" {
         Ok(None)
@@ -58,7 +58,7 @@ fn parse_pos_or_below(s: &str) -> Result<Option<(i32, i32, i32)>> {
 
 fn parse_args() -> Result<Args> {
     let mut it = std::env::args().skip(1);
-    let cmd = it.next().ok_or_else(|| anyhow!("użycie: mc-probe <status|join|mock-session> [opcje]"))?;
+    let cmd = it.next().ok_or_else(|| anyhow!("usage: mc-probe <status|join|mock-session> [options]"))?;
     let mut a = Args {
         cmd,
         host: "127.0.0.1".into(),
@@ -99,7 +99,7 @@ fn parse_args() -> Result<Args> {
             "--online" => a.online = true,
             "--session-url" => a.session_url = it.next().unwrap(),
             "--dump" => a.dump = it.next(),
-            o => bail!("nieznana opcja {o}"),
+            o => bail!("unknown option {o}"),
         }
     }
     Ok(a)
@@ -112,7 +112,7 @@ struct Client {
     enc: FrameEncoder,
     cipher: Option<Encryptor>,
     buf: Vec<u8>,
-    /// Zrzut surowych pakietów clientbound: [stan u8][len u32 BE][id+body]; stan: 0 login, 1 config, 2 play.
+    /// Dump of raw clientbound packets: [state u8][len u32 BE][id+body]; state: 0 login, 1 config, 2 play.
     dump: Option<std::fs::File>,
     state: u8,
 }
@@ -132,7 +132,7 @@ impl Client {
         self.wr.write_all(&f).await?;
         Ok(())
     }
-    /// `Ok(None)` przy zamknięciu połączenia / przekroczeniu czasu.
+    /// `Ok(None)` when the connection is closed / on timeout.
     async fn recv(&mut self, timeout: Duration) -> Result<Option<(i32, Vec<u8>)>> {
         let deadline = Instant::now() + timeout;
         loop {
@@ -164,7 +164,7 @@ async fn main() -> Result<()> {
         "status" => status(&a).await,
         "join" => join(&a).await,
         "mock-session" => mock_session(a.port).await,
-        c => bail!("nieznana komenda {c}"),
+        c => bail!("unknown command {c}"),
     }
 }
 
@@ -173,13 +173,13 @@ async fn status(a: &Args) -> Result<()> {
     let h = Intention { protocol_version: ids::PROTOCOL_VERSION, server_address: a.host.clone(), server_port: a.port, next_state: 1 };
     c.send(&h.encode()).await?;
     c.send(&mc_protocol::frame::payload(ids::status::serverbound::STATUS_REQUEST, |_| {})).await?;
-    let (id, body) = c.recv(Duration::from_secs(5)).await?.ok_or_else(|| anyhow!("brak odpowiedzi statusu"))?;
+    let (id, body) = c.recv(Duration::from_secs(5)).await?.ok_or_else(|| anyhow!("no status response"))?;
     assert_eq!(id, ids::status::clientbound::STATUS_RESPONSE);
     let json = Reader::new(&body).string(32767)?;
     println!("STATUS_JSON {json}");
     let t0 = Instant::now();
     c.send(&mc_protocol::frame::payload(ids::status::serverbound::PING_REQUEST, |w| w.put_i64(0x1234_5678_9abc))).await?;
-    let (id, body) = c.recv(Duration::from_secs(5)).await?.ok_or_else(|| anyhow!("brak pong"))?;
+    let (id, body) = c.recv(Duration::from_secs(5)).await?.ok_or_else(|| anyhow!("no pong"))?;
     assert_eq!(id, ids::status::clientbound::PONG_RESPONSE);
     assert_eq!(Reader::new(&body).i64()?, 0x1234_5678_9abc);
     println!("PONG ok ({} µs)", t0.elapsed().as_micros());
@@ -189,11 +189,11 @@ async fn status(a: &Args) -> Result<()> {
 // --------------------------------------------------------------- atrapa sesji
 
 async fn mock_session(port: u16) -> Result<()> {
-    // Minimalny serwer HTTP: POST /join?username=&serverId= zapamiętuje, GET /?username=&serverId= zwraca profil.
+    // Minimal HTTP server: POST /join?username=&serverId= records the join, GET /?username=&serverId= returns the profile.
     use std::sync::{Arc, Mutex};
     let joined: Arc<Mutex<BTreeMap<(String, String), ()>>> = Arc::new(Mutex::new(BTreeMap::new()));
     let l = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
-    println!("mock-session na :{port}");
+    println!("mock-session on :{port}");
     loop {
         let (mut s, _) = l.accept().await?;
         let joined = joined.clone();
@@ -222,7 +222,7 @@ async fn mock_session(port: u16) -> Result<()> {
     }
 }
 
-/// Klient HTTP „POST /join" bez zależności (atrapa działa na zwykłym TCP).
+/// A dependency-free HTTP client for "POST /join" (the mock runs over plain TCP).
 async fn mock_join(url: &str, user: &str, server_id: &str) -> Result<()> {
     let hostport = url.trim_start_matches("http://");
     let mut s = TcpStream::connect(hostport).await?;
@@ -274,14 +274,14 @@ async fn join(a: &Args) -> Result<()> {
 
     // ---- login
     loop {
-        let (id, body) = c.recv(Duration::from_secs(10)).await?.ok_or_else(|| anyhow!("rozłączono w trakcie loginu"))?;
+        let (id, body) = c.recv(Duration::from_secs(10)).await?.ok_or_else(|| anyhow!("disconnected during login"))?;
         let mut r = Reader::new(&body);
         use ids::login::clientbound as lc;
         match id {
             lc::LOGIN_DISCONNECT => bail!("login disconnect: {}", r.string(262144)?),
             lc::HELLO => {
                 if !a.online {
-                    bail!("serwer wymaga online-mode; uruchom probe z --online (i atrapą sesji)");
+                    bail!("the server requires online-mode; run the probe with --online (and a mock session server)");
                 }
                 let server_id = r.string(20)?;
                 let pubkey = r.byte_array(1024)?.to_vec();
@@ -305,7 +305,7 @@ async fn join(a: &Args) -> Result<()> {
                 let t = r.varint()?;
                 c.enc = FrameEncoder::new(Some(t));
                 c.dec.set_compression(t);
-                rep.notes.push(format!("kompresja: próg {t}"));
+                rep.notes.push(format!("compression: threshold {t}"));
             }
             lc::GAME_PROFILE => {
                 let u = r.uuid()?;
@@ -320,15 +320,15 @@ async fn join(a: &Args) -> Result<()> {
                 }
                 let strict = r.bool()?;
                 rep.notes.push(format!("login success: {n} {u} props={props} strict={strict}"));
-                rep.check("login: pakiet w całości zdekodowany", r.is_empty(), "");
+                rep.check("login: packet fully decoded", r.is_empty(), "");
                 if !a.online {
-                    rep.check("login: UUID offline zgodny z vanilla", u == uuid, format!("{u}"));
+                    rep.check("login: offline UUID matches vanilla", u == uuid, format!("{u}"));
                 }
                 c.send(&mc_protocol::frame::payload(ids::login::serverbound::LOGIN_ACKNOWLEDGED, |_| {})).await?;
                 c.state = 1;
                 break;
             }
-            other => bail!("nieoczekiwany pakiet login {other}"),
+            other => bail!("unexpected login packet {other}"),
         }
     }
 
@@ -337,7 +337,7 @@ async fn join(a: &Args) -> Result<()> {
     let mut registries: Vec<(String, usize)> = Vec::new();
     let mut tags_regs = 0usize;
     loop {
-        let (id, body) = c.recv(Duration::from_secs(10)).await?.ok_or_else(|| anyhow!("rozłączono w configuration"))?;
+        let (id, body) = c.recv(Duration::from_secs(10)).await?.ok_or_else(|| anyhow!("disconnected during configuration"))?;
         let name = ids::names::configuration_clientbound(id);
         *rep.counts.entry(format!("config/{name}")).or_default() += 1;
         let mut r = Reader::new(&body);
@@ -356,7 +356,7 @@ async fn join(a: &Args) -> Result<()> {
             }
             cc::SELECT_KNOWN_PACKS => {
                 let packs = packets::decode_known_packs(&mut r)?;
-                rep.notes.push(format!("known packs serwera: {packs:?}"));
+                rep.notes.push(format!("server known packs: {packs:?}"));
                 let reply: Vec<KnownPack> = if a.known_packs { packs } else { vec![] };
                 c.send(&packets::encode_known_packs_serverbound(&reply)).await?;
             }
@@ -368,15 +368,15 @@ async fn join(a: &Args) -> Result<()> {
                     r.identifier()?;
                     if r.bool()? {
                         with_data += 1;
-                        Tag::read_network(&mut r)?.ok_or_else(|| anyhow!("pusty NBT w registry_data"))?;
+                        Tag::read_network(&mut r)?.ok_or_else(|| anyhow!("empty NBT in registry_data"))?;
                     }
                 }
-                rep.check(&format!("registry {reg}: pakiet w całości zdekodowany"), r.is_empty(), "");
+                rep.check(&format!("registry {reg}: packet fully decoded"), r.is_empty(), "");
                 registries.push((reg.clone(), n as usize));
                 if !a.known_packs {
-                    rep.check(&format!("registry {reg}: pełne dane (brak known packs)"), with_data == n, format!("{with_data}/{n}"));
+                    rep.check(&format!("registry {reg}: full data (no known packs)"), with_data == n, format!("{with_data}/{n}"));
                 } else {
-                    rep.check(&format!("registry {reg}: bez danych (known packs)"), with_data == 0, format!("{with_data}/{n}"));
+                    rep.check(&format!("registry {reg}: no data (known packs)"), with_data == 0, format!("{with_data}/{n}"));
                 }
             }
             cc::UPDATE_TAGS => {
@@ -392,7 +392,7 @@ async fn join(a: &Args) -> Result<()> {
                         }
                     }
                 }
-                rep.check("tags: pakiet w całości zdekodowany", r.is_empty(), "");
+                rep.check("tags: packet fully decoded", r.is_empty(), "");
             }
             cc::FINISH_CONFIGURATION => {
                 c.send(&packets::config_finish_serverbound()).await?;
@@ -403,9 +403,9 @@ async fn join(a: &Args) -> Result<()> {
             _ => {}
         }
     }
-    rep.notes.push(format!("rejestry: {:?}", registries));
-    rep.check("configuration: 11 rejestrów synchronizowanych", registries.len() == 11, format!("{}", registries.len()));
-    rep.check("configuration: tagi niepuste", tags_regs > 10, format!("{tags_regs} rejestrów z tagami"));
+    rep.notes.push(format!("registries: {:?}", registries));
+    rep.check("configuration: 11 synchronized registries", registries.len() == 11, format!("{}", registries.len()));
+    rep.check("configuration: tags present", tags_regs > 10, format!("{tags_regs} registries with tags"));
 
     // ---- play
     let t_end = Instant::now() + Duration::from_secs(a.secs);
@@ -422,7 +422,7 @@ async fn join(a: &Args) -> Result<()> {
     let mut keepalives = 0;
     while Instant::now() < t_end {
         let Some((id, body)) = c.recv(Duration::from_millis(200)).await? else {
-            // brak danych — jeśli połączenie zamknięte, kończymy
+            // no data: if the connection is closed, we are done
             if Instant::now() >= t_end {
                 break;
             }
@@ -457,15 +457,15 @@ async fn join(a: &Args) -> Result<()> {
                 rep.notes.push(format!(
                     "LOGIN eid={eid} hardcore={hardcore} dims={dims:?} max={max_players} view={view} sim={sim} dim_type={dim_type} dim={dim} seed={seed} gm={gm} prev={prev} debug={debug} flat={flat} death={death} cd={cooldown} secure={secure}"
                 ));
-                rep.check("play/login: pakiet w całości zdekodowany", r.is_empty(), format!("zostało {} B", r.remaining()));
-                rep.check("play/login: wymiar overworld, typ 0", dim == "minecraft:overworld" && dim_type == 0, "");
+                rep.check("play/login: packet fully decoded", r.is_empty(), format!("{} B left", r.remaining()));
+                rep.check("play/login: overworld dimension, type 0", dim == "minecraft:overworld" && dim_type == 0, "");
             }
             pc::PLAYER_POSITION => {
                 let (x, y, z) = (r.f64()?, r.f64()?, r.f64()?);
                 let (yaw, pitch) = (r.f32()?, r.f32()?);
                 let rel = r.u8()?;
                 let tid = r.varint()?;
-                rep.check("play/player_position: w całości zdekodowany", r.is_empty(), "");
+                rep.check("play/player_position: fully decoded", r.is_empty(), "");
                 pos = (x, y, z);
                 got_position = true;
                 rep.notes.push(format!("POSITION ({x},{y},{z}) yaw={yaw} pitch={pitch} rel={rel} teleport_id={tid}"));
@@ -490,16 +490,16 @@ async fn join(a: &Args) -> Result<()> {
                 let n = r.varint()?;
                 batches += 1;
                 c.send(&mc_protocol::frame::payload(ids::play::serverbound::CHUNK_BATCH_RECEIVED, |w| w.put_f32(20.0))).await?;
-                rep.notes.push(format!("batch #{batches}: {n} chunków"));
+                rep.notes.push(format!("batch #{batches}: {n} chunks"));
             }
             pc::LEVEL_CHUNK_WITH_LIGHT => {
                 let info = parse_chunk(&body)?;
                 chunks_ok += 1;
                 if !first_chunk_checked {
                     first_chunk_checked = true;
-                    rep.check("chunk: pakiet w całości zdekodowany", info.fully_consumed, "");
-                    rep.check("chunk: 24 sekcje", info.sections.len() == 24, format!("{}", info.sections.len()));
-                    rep.check("chunk: maski światła w granicach 26 sekcji", info.light_sections <= 26, format!("{}", info.light_sections));
+                    rep.check("chunk: packet fully decoded", info.fully_consumed, "");
+                    rep.check("chunk: 24 sections", info.sections.len() == 24, format!("{}", info.sections.len()));
+                    rep.check("chunk: light masks within 26 sections", info.light_sections <= 26, format!("{}", info.light_sections));
                     if let Some(b) = &blocks {
                         let bedrock = b["minecraft:bedrock"];
                         let dirt = b["minecraft:dirt"];
@@ -509,14 +509,14 @@ async fn join(a: &Args) -> Result<()> {
                         let col = [(0, bedrock, "bedrock"), (1, dirt, "dirt"), (2, dirt, "dirt"), (3, grass, "grass_block"), (4, air, "air")];
                         for (y, want, nm) in col {
                             let got = s0.block(3, y, 5);
-                            rep.check(&format!("chunk: blok (3,{},5) = {nm} wg blocks.json Mojang", y as i32 - 64), got == want, format!("got {got}, want {want}"));
+                            rep.check(&format!("chunk: block (3,{},5) = {nm} per Mojang blocks.json", y as i32 - 64), got == want, format!("got {got}, want {want}"));
                         }
-                        rep.check("chunk: sekcja 1 cała powietrze", info.sections[1].block(0, 0, 0) == air, "");
+                        rep.check("chunk: section 1 is all air", info.sections[1].block(0, 0, 0) == air, "");
                     }
                     rep.check("chunk: heightmap MOTION_BLOCKING[0] == 4", info.heightmap_first == Some(4), format!("{:?}", info.heightmap_first));
-                    rep.check("chunk: biom sekcji = plains (spójny w obrębie sekcji)", info.sections[0].biome_uniform.is_some(), format!("{:?}", info.sections[0].biome_uniform));
-                    rep.check("chunk: światło nieba 2048 B/sekcję", info.sky_arrays_ok, "");
-                    rep.notes.push(format!("pierwszy chunk: ({}, {}), bajtów={}", info.x, info.z, body.len()));
+                    rep.check("chunk: section biome = plains (uniform within the section)", info.sections[0].biome_uniform.is_some(), format!("{:?}", info.sections[0].biome_uniform));
+                    rep.check("chunk: sky light is 2048 B per section", info.sky_arrays_ok, "");
+                    rep.notes.push(format!("first chunk: ({}, {}), bytes={}", info.x, info.z, body.len()));
                 }
             }
             pc::SYSTEM_CHAT => {
@@ -540,7 +540,7 @@ async fn join(a: &Args) -> Result<()> {
             }
             pc::DISCONNECT => {
                 let t = Tag::read_network(&mut r)?;
-                bail!("rozłączono przez serwer: {t:?}");
+                bail!("disconnected by the server: {t:?}");
             }
             _ => {}
         }
@@ -569,7 +569,7 @@ async fn join(a: &Args) -> Result<()> {
             use ids::play::serverbound as sbp;
             let below = (pos.0.floor() as i32, pos.1.floor() as i32 - 1, pos.2.floor() as i32);
             if let Some((x, y, z)) = a.brk.map(|p| p.unwrap_or(below)) {
-                // PlayerAction START_DESTROY_BLOCK (0), ściana UP (1), sekwencja 1
+                // PlayerAction START_DESTROY_BLOCK (0), face UP (1), sequence 1
                 c.send(&mc_protocol::frame::payload(sbp::PLAYER_ACTION, |w| {
                     w.put_varint(0);
                     w.put_block_pos(x, y, z);
@@ -578,11 +578,11 @@ async fn join(a: &Args) -> Result<()> {
                 }))
                 .await?;
             }
-            // beside: gorna sciana bloku obok tego pod stopami, wiec miejsce docelowe nie koliduje z graczem
+            // beside: the top face of the block next to the one under the feet, so the target position does not collide with the player
             let target = if a.place_beside { (below.0 + 1, below.1, below.2) } else { below };
             if let Some((x, y, z)) = a.place.map(|p| p.unwrap_or(target)) {
-                // kamień (minecraft:stone) do slotu 36 (hotbar 0) w trybie kreatywnym, potem UseItemOn na górną ścianę
-                let stone = 1; // ID przedmiotu stone z rejestru minecraft:item
+                // stone (minecraft:stone) into slot 36 (hotbar 0) in creative mode, then UseItemOn on the top face
+                let stone = 1; // item ID of stone from the minecraft:item registry
                 c.send(&mc_protocol::frame::payload(sbp::SET_CREATIVE_MODE_SLOT, |w| {
                     w.put_i16(36);
                     w.put_varint(1);
@@ -617,39 +617,39 @@ async fn join(a: &Args) -> Result<()> {
         }
     }
 
-    rep.check("play: odebrano position", got_position, "");
-    rep.check("play: odebrano chunki", chunks_ok >= 9, format!("{chunks_ok}"));
-    rep.check("play: odebrano batch_finished", batches >= 1, format!("{batches}"));
+    rep.check("play: position received", got_position, "");
+    rep.check("play: chunks received", chunks_ok >= 9, format!("{chunks_ok}"));
+    rep.check("play: batch_finished received", batches >= 1, format!("{batches}"));
     if a.chat.is_some() {
-        rep.check("play: czat odesłany do nadawcy", chat_echo, "");
+        rep.check("play: chat echoed to the sender", chat_echo, "");
     }
     rep.notes.push(format!("keepalive: {keepalives}"));
 
     // ---- raport
-    println!("== NOTATKI");
+    println!("== NOTES");
     for n in &rep.notes {
         println!("  {n}");
     }
-    println!("== LICZNIKI PAKIETÓW");
+    println!("== PACKET COUNTS");
     for (k, v) in &rep.counts {
         println!("  {k}: {v}");
     }
-    println!("== SPRAWDZENIA");
+    println!("== CHECKS");
     let mut failed = 0;
     for (n, ok, d) in &rep.checks {
-        println!("  [{}] {n} {d}", if *ok { "OK " } else { "BŁĄD" });
+        println!("  [{}] {n} {d}", if *ok { "OK " } else { "FAIL" });
         if !*ok {
             failed += 1;
         }
     }
-    println!("== WYNIK: {} / {} sprawdzeń OK", rep.checks.len() - failed, rep.checks.len());
+    println!("== RESULT: {} / {} checks OK", rep.checks.len() - failed, rep.checks.len());
     if failed > 0 {
         std::process::exit(1);
     }
     Ok(())
 }
 
-// ------------------------------------------- niezależny parser chunka (probe)
+// ------------------------------------------- independent chunk parser (probe)
 
 struct SectionInfo {
     palette: Vec<u32>,
@@ -690,7 +690,7 @@ fn read_container(r: &mut Reader<'_>, max_indirect: u8) -> Result<(u8, Vec<u32>,
         let v = r.varint()? as u32;
         let n = r.varint()?;
         if n != 0 {
-            bail!("kontener jednowartościowy ma dane");
+            bail!("a single-valued container has data");
         }
         return Ok((0, vec![], vec![], Some(v)));
     }
@@ -713,7 +713,7 @@ fn parse_chunk(body: &[u8]) -> Result<ChunkInfo> {
     let mut r = Reader::new(body);
     let x = r.i32()?;
     let z = r.i32()?;
-    let hm = Tag::read_network(&mut r)?.ok_or_else(|| anyhow!("brak heightmap"))?;
+    let hm = Tag::read_network(&mut r)?.ok_or_else(|| anyhow!("no heightmap"))?;
     let heightmap_first = match &hm {
         Tag::Compound(c) => match c.get("MOTION_BLOCKING") {
             Some(Tag::LongArray(a)) => Some(a[0] & 0x1FF),
@@ -766,7 +766,7 @@ fn parse_chunk(body: &[u8]) -> Result<ChunkInfo> {
     Ok(ChunkInfo { x, z, sections, heightmap_first, light_sections, sky_arrays_ok: sky_ok, fully_consumed: r.is_empty() })
 }
 
-// ---------- SHA-1 „hex ze znakiem" (jak BigInteger.toString(16)); osobna kopia na potrzeby probe
+// ---------- SHA-1 "signed hex" (like BigInteger.toString(16)); a separate copy for the probe
 fn minecraft_hex_digest(parts: &[&[u8]]) -> String {
     use sha1::{Digest, Sha1};
     let mut h = Sha1::new();

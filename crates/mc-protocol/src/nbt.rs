@@ -1,5 +1,5 @@
-//! NBT: zapis sieciowy (korzeń bez nazwy, od 1.20.2) oraz pliki (korzeń nazwany).
-//! Zachowuje kolejność wstawiania kluczy (stabilne bajty dla testów 1:1).
+//! NBT: network encoding (unnamed root, since 1.20.2) and file encoding (named root).
+//! Keeps key insertion order (stable bytes for 1:1 tests).
 
 use crate::buf::{Put, Reader};
 use crate::error::{Error, Result};
@@ -47,9 +47,9 @@ impl Compound {
         self.0.is_empty()
     }
 
-    /// Kolejność zapisu kluczy jak w `CompoundTag` Mojang, który trzyma wpisy w `java.util.HashMap`:
-    /// indeks koszyka = `(h ^ (h >>> 16)) & (n - 1)`, `h = String.hashCode()`, `n` = potęga dwójki >= 16
-    /// z rozmiarem <= 0.75·n; w obrębie koszyka zachowana jest kolejność wstawiania.
+    /// Key write order like Mojang's `CompoundTag`, which keeps its entries in a `java.util.HashMap`:
+    /// bucket index = `(h ^ (h >>> 16)) & (n - 1)`, `h = String.hashCode()`, `n` = power of two >= 16
+    /// with size <= 0.75·n; insertion order is kept within a bucket.
     pub fn java_order(&self) -> Vec<usize> {
         let len = self.0.len();
         let mut idx: Vec<usize> = (0..len).collect();
@@ -64,7 +64,7 @@ impl Compound {
             let h = java_string_hash(k) as u32;
             ((h ^ (h >> 16)) as usize) & (n - 1)
         };
-        idx.sort_by_key(|&i| bucket(&self.0[i].0)); // sort_by_key jest stabilny
+        idx.sort_by_key(|&i| bucket(&self.0[i].0)); // sort_by_key is stable
         idx
     }
 }
@@ -74,8 +74,8 @@ pub fn java_string_hash(s: &str) -> i32 {
     s.encode_utf16().fold(0i32, |h, u| h.wrapping_mul(31).wrapping_add(u as i32))
 }
 
-/// Jednorodność listy jak w `NbtOps`: gdy typy elementów się różnią, każdy element niebędący
-/// compoundem jest opakowany w `{"": wartość}`.
+/// List homogeneity like `NbtOps`: when element types differ, every element that is not a
+/// compound is wrapped in `{"": value}`.
 pub fn unify_list(items: Vec<Tag>) -> Vec<Tag> {
     let Some(first) = items.first() else { return items };
     let id = first.id();
@@ -107,13 +107,13 @@ impl Tag {
         Tag::String(s.into())
     }
 
-    /// Zapis sieciowy: bajt typu + ładunek (bez nazwy korzenia).
+    /// Network encoding: type byte + payload (no root name).
     pub fn write_network(&self, w: &mut Vec<u8>) {
         w.put_u8(self.id());
         self.write_payload(w);
     }
 
-    /// Zapis „plikowy”: bajt typu + nazwa + ładunek.
+    /// File encoding: type byte + name + payload.
     pub fn write_named(&self, name: &str, w: &mut Vec<u8>) {
         w.put_u8(self.id());
         write_mutf8(name, w);
@@ -168,7 +168,7 @@ impl Tag {
         }
     }
 
-    /// Odczyt korzenia sieciowego (bez nazwy). `None` dla TAG_End (pusty NBT).
+    /// Reads a network root (unnamed). `None` for TAG_End (empty NBT).
     pub fn read_network(r: &mut Reader<'_>) -> Result<Option<Tag>> {
         let id = r.u8()?;
         if id == 0 {
@@ -177,7 +177,7 @@ impl Tag {
         Ok(Some(Self::read_payload(id, r, 0)?))
     }
 
-    /// Odczyt korzenia plikowego (z nazwą).
+    /// Reads a file root (named).
     pub fn read_named(r: &mut Reader<'_>) -> Result<Option<(String, Tag)>> {
         let id = r.u8()?;
         if id == 0 {
@@ -257,8 +257,8 @@ impl Tag {
     }
 }
 
-/// Modified UTF-8 (Java `DataOutput.writeUTF`): U+0000 jako C0 80, znaki
-/// uzupełniające jako dwie pary zastępcze po 3 bajty.
+/// Modified UTF-8 (Java `DataOutput.writeUTF`): U+0000 as C0 80, supplementary
+/// characters as two surrogates of 3 bytes each.
 pub fn write_mutf8(s: &str, w: &mut Vec<u8>) {
     let mut out = Vec::with_capacity(s.len());
     for u in s.encode_utf16() {
@@ -341,7 +341,7 @@ mod tests {
         c.java_order().into_iter().map(|i| c.0[i].0.clone()).collect()
     }
 
-    /// Kolejności zmierzone na prawdziwym serwerze vanilla 1.21.1 (pakiety system_chat / player_chat).
+    /// Orders measured on the real vanilla 1.21.1 server (system_chat / player_chat packets).
     #[test]
     fn java_hashmap_order_matches_vanilla_observations() {
         assert_eq!(order(&["text", "color", "extra"]), ["color", "extra", "text"]);
@@ -352,7 +352,7 @@ mod tests {
         assert_eq!(order(&["type", "id", "name"]), ["name", "id", "type"]);
         assert_eq!(order(&["action", "contents"]), ["contents", "action"]);
         assert_eq!(order(&["action", "value"]), ["action", "value"]);
-        assert_eq!(order(&["translate", "with"]), ["with", "translate"]); // bajty /list z vanilla zaczynają się od `with`
+        assert_eq!(order(&["translate", "with"]), ["with", "translate"]); // the vanilla /list bytes start with `with`
         // heightmapy w pakiecie chunka: MOTION_BLOCKING, WORLD_SURFACE (bajty identyczne z vanilla)
         assert_eq!(order(&["WORLD_SURFACE", "MOTION_BLOCKING"]), ["MOTION_BLOCKING", "WORLD_SURFACE"]);
     }

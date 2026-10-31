@@ -1,8 +1,8 @@
-//! Wątek gry: jedna pętla 20 TPS (jak główny wątek vanilla) przetwarzająca zdarzenia sieciowe,
-//! stan graczy, śledzenie chunków/encji i wysyłkę pakietów.
+//! Game thread: a single 20 TPS loop (like the vanilla main thread) processing network events,
+//! player state, chunk/entity tracking and packet sending.
 //!
-//! Sekwencja dołączania odtworzona z `PlayerList.placeNewPlayer`, wysyłka chunków z
-//! `PlayerChunkSender`, widok chunków z `ChunkTrackingView`, ruch encji z `ServerEntity.sendChanges`.
+//! The join sequence is reconstructed from `PlayerList.placeNewPlayer`, chunk sending from
+//! `PlayerChunkSender`, the chunk view from `ChunkTrackingView`, entity movement from `ServerEntity.sendChanges`.
 
 use crate::net::{GameEvent, JoinRequest, PlayerSender, Shared, VERSION_NAME};
 use crate::world::World;
@@ -24,7 +24,7 @@ const TICK: Duration = Duration::from_millis(50);
 const KEEPALIVE_INTERVAL_MS: u128 = 15_000;
 const MAX_PENDING_BYTES: usize = 32 * 1024 * 1024;
 
-/// ID z oficjalnych rejestrów potrzebne w czasie gry.
+/// IDs from the official registries needed during the game.
 pub struct Ids {
     pub dimension_type: i32,
     pub player_entity_type: i32,
@@ -101,9 +101,9 @@ struct Player {
     // chunki
     view: Option<View>,
     sender_state: ChunkSender,
-    // widoczne encje (sesje innych graczy)
+    // visible entities (sessions of other players)
     tracked: HashSet<u64>,
-    // stan wysłany do obserwatorów (ServerEntity)
+    // state sent to observers (ServerEntity)
     base: (f64, f64, f64),
     last_yaw: i32,
     last_pitch: i32,
@@ -111,11 +111,11 @@ struct Player {
     was_on_ground: bool,
     teleport_delay: i32,
     ticks: u64,
-    // inventory (uproszczone): [slot menu] -> (id przedmiotu, ilość)
+    // inventory (simplified): [menu slot] -> (item id, count)
     inventory: Vec<Option<(i32, i32)>>,
     selected: i8,
     first_tick_done: bool,
-    /// Najwyższa sekwencja do potwierdzenia na początku następnego ticka (`ackBlockChangesUpTo`), -1 = brak.
+    /// Highest sequence to acknowledge at the start of the next tick (`ackBlockChangesUpTo`), -1 = none.
     ack_up_to: i32,
     /// Stan ekwipunku znany klientowi (`remoteSlots`) i licznik `stateId` menu.
     remote_inv: Vec<Option<(i32, i32)>>,
@@ -134,7 +134,7 @@ pub struct Game {
     players: BTreeMap<u64, Player>,
     next_entity_id: i32,
     tick: u64,
-    /// Zmienione bloki w tym ticku wg sekcji (chunk x, chunk z, sekcja y) -> pozycje lokalne.
+    /// Blocks changed in this tick by section (chunk x, chunk z, section y) -> local positions.
     dirty: BTreeMap<(i32, i32, i32), std::collections::BTreeSet<(u8, u8, u8)>>,
     game_time: i64,
     day_time: i64,
@@ -153,7 +153,7 @@ impl Game {
 
     pub fn run(mut self, rx: Receiver<GameEvent>) {
         let mut next = Instant::now() + TICK;
-        info!("Pętla gry uruchomiona (20 TPS)");
+        info!("Game loop started (20 TPS)");
         'main: loop {
             loop {
                 let timeout = next.saturating_duration_since(Instant::now());
@@ -168,21 +168,21 @@ impl Game {
             next += TICK;
             let now = Instant::now();
             if now > next + Duration::from_millis(2000) {
-                warn!("Nie nadążam! Pominięto {} ms", (now - next).as_millis());
+                warn!("Can't keep up! Skipping {} ms", (now - next).as_millis());
                 next = now;
             }
             if self.stopping {
                 break;
             }
         }
-        // zamknięcie: rozłącz wszystkich
+        // shutdown: disconnect everybody
         let sessions: Vec<u64> = self.players.keys().copied().collect();
         for s in sessions {
             self.kick(s, Text::translatable("multiplayer.disconnect.server_shutdown"));
         }
     }
 
-    // ------------------------------------------------------------ wysyłka
+    // ------------------------------------------------------------ sending
 
     fn frame(&mut self, payload: &[u8]) -> Arc<Vec<u8>> {
         Arc::new(self.enc.encode(payload))
@@ -204,13 +204,13 @@ impl Game {
     fn kick(&mut self, session: u64, reason: Text) {
         let f = self.frame(&pk::disconnect(&reason));
         if let Some(p) = self.players.get(&session) {
-            info!("{} został rozłączony: {}", p.name, text_plain(&reason));
+            info!("{} was disconnected: {}", p.name, text_plain(&reason));
             p.sender.close(Some(f));
         }
         self.remove_player(session);
     }
 
-    // ------------------------------------------------------------ zdarzenia
+    // ------------------------------------------------------------ events
 
     fn handle_event(&mut self, ev: GameEvent) {
         match ev {
@@ -228,7 +228,7 @@ impl Game {
     }
 
     fn display_name(p: &Player) -> Text {
-        // Player.getDisplayName: nazwa z klikaniem (/tell), podpowiedzią (show_entity) i wstawką.
+        // Player.getDisplayName: the name with click (/tell), hover tooltip (show_entity) and insertion.
         let u = p.uuid.as_u128();
         let id = Tag::IntArray(vec![(u >> 96) as i32, (u >> 64) as i32, (u >> 32) as i32, u as i32]);
         let mut t = Text::plain(p.name.clone());
@@ -256,13 +256,13 @@ impl Game {
         st.sample = self.players.values().map(|p| (p.name.clone(), p.uuid)).collect();
     }
 
-    // ------------------------------------------------------------ dołączanie
+    // ------------------------------------------------------------ joining
 
     fn on_join(&mut self, req: JoinRequest) {
         let JoinRequest { session, profile, client_info, sender, addr } = req;
         let GameProfile { id: uuid, name, properties } = profile;
 
-        // „Zalogowano z innej lokalizacji": stara sesja wylatuje.
+        // "Logged in from another location": the old session is kicked.
         let dup: Vec<u64> = self.players.iter().filter(|(_, p)| p.uuid == uuid).map(|(s, _)| *s).collect();
         for s in dup {
             self.kick(s, Text::translatable("multiplayer.disconnect.duplicate_login"));
@@ -327,7 +327,7 @@ impl Game {
 
         let s = &self.shared.settings;
         // 1. Login
-        // Zbiór kluczy wymiarów jak w vanilla (`server.levelKeys()`), w kolejności obserwowanej na prawdziwym serwerze.
+        // The set of dimension keys like in vanilla (`server.levelKeys()`), in the order observed on the real server.
         let dims = [self.ids.overworld, "minecraft:the_end", "minecraft:the_nether"];
         let login = pk::login(&pk::LoginInfo {
             entity_id,
@@ -353,30 +353,30 @@ impl Game {
         let difficulty = s.difficulty;
         let motd = Text::plain(s.motd.clone());
         self.send(session, &login);
-        // 2-5. Trudność, uprawnienia, zaznaczony slot, receptury
+        // 2-5. Difficulty, abilities, selected slot, recipes
         self.send(session, &pk::change_difficulty(difficulty, false));
         let ab = abilities_for(gm);
         self.send(session, &pk::player_abilities(&ab));
         self.send(session, &pk::set_carried_item(0));
         self.send(session, &pk::update_recipes_empty());
-        // 6. Poziom uprawnień (entity event 24 + poziom)
+        // 6. Permission level (entity event 24 + level)
         self.send(session, &pk::entity_event(entity_id, 24));
-        // 8. Komunikat o dołączeniu — do graczy już na liście (nowy jeszcze się na niej nie znajduje)
+        // 8. Join message to the players already on the list (the new player is not on it yet)
         let dn = Self::display_name(&self.players[&session]);
         let join_msg = Text::translatable("multiplayer.player.joined").with_args(vec![dn]).color("yellow");
         let f = pk::system_chat(&join_msg, false);
         self.broadcast(&f, Some(session));
-        // 9. Teleport (pozycja startowa)
+        // 9. Teleport (start position)
         self.teleport(session, x, y, z, 0.0, 0.0);
-        // 10. Dane serwera
+        // 10. Server data
         self.send(session, &pk::server_data(&motd, None));
-        // 11. Lista graczy: istniejący -> nowy
+        // 11. Player list: existing -> new
         let others: Vec<u64> = self.players.keys().copied().filter(|k| *k != session).collect();
-        // vanilla wysyła ten pakiet zawsze, także z pustą listą (createPlayerInitializing(this.players))
+        // vanilla always sends this packet, even with an empty list (createPlayerInitializing(this.players))
         let entries: Vec<PlayerInfoEntry<'_>> = others.iter().map(|k| Self::info_entry(&self.players[k])).collect();
         let payload = pk::player_info_update(pk::player_info_action::INITIALIZING, &entries);
         self.send(session, &payload);
-        // 12. nowy -> wszyscy (łącznie z nim)
+        // 12. new -> everybody (including itself)
         let payload = pk::player_info_update(pk::player_info_action::INITIALIZING, &[Self::info_entry(&self.players[&session])]);
         self.broadcast(&payload, None);
         // 13. sendLevelInfo
@@ -385,15 +385,15 @@ impl Game {
         let (sx, sy, sz) = self.world.spawn;
         self.send(session, &pk::set_default_spawn_position(sx, sy, sz, 0.0));
         self.send(session, &pk::game_event(pk::game_event::LEVEL_CHUNKS_LOAD_START, 0.0));
-        // tickRateManager().updateJoiningPlayer: częstotliwość ticków i krok
+        // tickRateManager().updateJoiningPlayer: tick rate and step
         self.send(session, &pk::ticking_state(20.0, false));
         self.send(session, &pk::ticking_step(0));
-        // 14. addNewPlayer: śledzenie chunków i encji
+        // 14. addNewPlayer: chunk and entity tracking
         self.update_chunk_tracking(session);
         self.update_entity_tracking(session);
         // 15. initInventoryMenu
         self.send(session, &pk::container_set_content_empty(0, 1, 46));
-        // własne dane encji (sendPairingData dla samego gracza)
+        // the player's own entity data (sendPairingData for the player itself)
         let data = Self::entity_data_values(&self.players[&session]);
         self.send(session, &pk::set_entity_data(entity_id, &data));
         self.sync_status();
@@ -404,7 +404,7 @@ impl Game {
         let uuid = p.uuid;
         let eid = p.entity_id;
         let dn = Self::display_name(&p);
-        // zdejmij encję u obserwatorów
+        // remove the entity from observers
         let rm = pk::remove_entities(&[eid]);
         let f = self.frame(&rm);
         for o in self.players.values_mut() {
@@ -416,7 +416,7 @@ impl Game {
         self.broadcast(&info_rm, None);
         let left = Text::translatable("multiplayer.player.left").with_args(vec![dn]).color("yellow");
         self.broadcast(&pk::system_chat(&left, false), None);
-        // zamknij gniazdo (jeśli jeszcze otwarte)
+        // close the socket (if still open)
         p.sender.close(None);
         self.sync_status();
     }
@@ -455,7 +455,7 @@ impl Game {
         if old.map(|o| (o.cx, o.cz)) != Some((new.cx, new.cz)) {
             to_send_center = true;
         }
-        // różnica widoków
+        // difference of the views
         let mut add: Vec<(i32, i32)> = Vec::new();
         let mut drop: Vec<(i32, i32)> = Vec::new();
         match old {
@@ -525,7 +525,7 @@ impl Game {
             let v = p.view.unwrap();
             ((v.cx, v.cz), st.batch_quota.floor() as usize)
         };
-        // najbliższe najpierw (Comparators.least / sortowanie po distanceSquared)
+        // nearest first (Comparators.least / sorting by distanceSquared)
         let mut list: Vec<(i32, i32)> = self.players[&session].sender_state.pending.iter().copied().collect();
         let dist = |c: &(i32, i32)| {
             let (dx, dz) = (c.0 - center.0, c.1 - center.1);
@@ -557,7 +557,7 @@ impl Game {
 
     // ------------------------------------------------------------ encje
 
-    /// Niedomyślne wartości metadanych gracza (`SynchedEntityData.getNonDefaultValues`), rosnąco po indeksie.
+    /// Non-default metadata values of a player (`SynchedEntityData.getNonDefaultValues`), ascending by index.
     fn entity_data_values(p: &Player) -> Vec<(u8, EntityData)> {
         let mut data: Vec<(u8, EntityData)> = Vec::new();
         let mut flags = 0i8;
@@ -580,13 +580,13 @@ impl Game {
         data
     }
 
-    /// Atrybuty synchronizowane z klientem dla świeżego gracza (kolejność jak w vanilla).
+    /// Attributes synchronized with the client for a fresh player (order like vanilla).
     fn player_attributes(&self) -> [(i32, f64); 3] {
         [(self.ids.attr_movement_speed, 0.1f32 as f64), (self.ids.attr_entity_range, 3.0), (self.ids.attr_block_range, 4.5)]
     }
 
-    /// Pakiety pojawienia się gracza u obserwatora: jedna paczka (`ClientboundBundlePacket`)
-    /// z add_entity, danymi encji i atrybutami, jak w `ServerEntity.sendPairingData`.
+    /// Packets for a player appearing at an observer: one bundle (`ClientboundBundlePacket`)
+    /// with add_entity, entity data and attributes, like `ServerEntity.sendPairingData`.
     fn spawn_packets(&self, p: &Player) -> Vec<Vec<u8>> {
         vec![
             pk::bundle_delimiter(),
@@ -597,8 +597,8 @@ impl Game {
         ]
     }
 
-    /// `ServerPlayer.adjustSpawnLocation`: losowy punkt w kwadracie o promieniu `spawnRadius` wokół spawnu świata
-    /// (iteracja z krokiem względnie pierwszym), pierwszy z poprawnym gruntem.
+    /// `ServerPlayer.adjustSpawnLocation`: a random point in a square of radius `spawnRadius` around the world spawn
+    /// (iterated with a coprime step), the first one with valid ground.
     fn adjust_spawn_location(&self) -> (i32, i32, i32) {
         use rand::Rng;
         const SPAWN_RADIUS: i32 = 10; // gamerule spawnRadius
@@ -618,8 +618,8 @@ impl Game {
         (sx, sy, sz)
     }
 
-    /// Widoczność wg `ChunkMap.TrackedEntity.updatePlayer`: odległość pozioma <= min(zasięg, viewDistance*16)
-    /// i chunk encji w widoku obserwatora. Zasięg encji gracza = 32 chunki.
+    /// Visibility per `ChunkMap.TrackedEntity.updatePlayer`: horizontal distance <= min(range, viewDistance*16)
+    /// and the entity's chunk inside the observer's view. A player entity's range is 32 chunks.
     fn visible(&self, viewer: &Player, target: &Player) -> bool {
         let dx = viewer.x - target.x;
         let dz = viewer.z - target.z;
@@ -629,7 +629,7 @@ impl Game {
         in_range && tracked_chunk
     }
 
-    /// Aktualizuje parowanie (spawn/despawn) między `session` a pozostałymi graczami w obu kierunkach.
+    /// Updates pairing (spawn/despawn) between `session` and the other players in both directions.
     fn update_entity_tracking(&mut self, session: u64) {
         let sessions: Vec<u64> = self.players.keys().copied().filter(|s| *s != session).collect();
         for other in sessions {
@@ -639,7 +639,7 @@ impl Game {
                 let o = &self.players[&other];
                 (self.visible(o, me), self.visible(me, o))
             };
-            // czy other widzi mnie
+            // whether the other player sees me
             let tracked_by_other = self.players[&other].tracked.contains(&session);
             if sees_me && !tracked_by_other {
                 let pkts = self.spawn_packets(&self.players[&session]);
@@ -652,7 +652,7 @@ impl Game {
                 self.send(other, &pk::remove_entities(&[eid]));
                 self.players.get_mut(&other).unwrap().tracked.remove(&session);
             }
-            // czy ja widzę other
+            // whether I see the other player
             let tracked_by_me = self.players[&session].tracked.contains(&other);
             if i_see && !tracked_by_me {
                 let pkts = self.spawn_packets(&self.players[&other]);
@@ -668,11 +668,11 @@ impl Game {
         }
     }
 
-    /// `ServerEntity.sendChanges` dla gracza (updateInterval = 2): rozsyła zmiany pozycji/obrotu do obserwatorów.
+    /// `ServerEntity.sendChanges` for a player (updateInterval = 2): sends position/rotation changes to observers.
     fn send_entity_changes(&mut self, session: u64) {
         let (payloads, observers): (Vec<Vec<u8>>, Vec<u64>) = {
             let p = self.players.get_mut(&session).unwrap();
-            let t = p.ticks; // tickCount z ServerEntity (rośnie po każdym wywołaniu)
+            let t = p.ticks; // tickCount of ServerEntity (grows after every call)
             p.ticks += 1;
             if t % 2 != 0 {
                 return;
@@ -684,7 +684,7 @@ impl Game {
             let dx = pos_enc(p.x) - pos_enc(bx);
             let dy = pos_enc(p.y) - pos_enc(by);
             let dz = pos_enc(p.z) - pos_enc(bz);
-            // VecDeltaCodec.delta: różnica względem zdekodowanej bazy (pozycja zaokrąglona do 1/4096)
+            // VecDeltaCodec.delta: difference from the decoded base (position rounded to 1/4096)
             let (ddx, ddy, ddz) = (p.x - bx, p.y - by, p.z - bz);
             let moved = ddx * ddx + ddy * ddy + ddz * ddz >= 7.6293945E-6;
             let pos_changed = moved || t % 60 == 0;
@@ -747,7 +747,7 @@ impl Game {
             let f = pk::set_time(self.game_time, self.day_time, true);
             self.broadcast(&f, None);
         }
-        // ChunkMap.tick -> ChunkHolder.broadcastChanges: zmiany bloków trafiają do graczy śledzących chunk
+        // ChunkMap.tick -> ChunkHolder.broadcastChanges: block changes go to the players tracking the chunk
         self.flush_block_changes();
         let sessions: Vec<u64> = self.players.keys().copied().collect();
         for s in sessions {
@@ -758,7 +758,7 @@ impl Game {
         }
     }
 
-    /// Ustawia blok i zapisuje zmianę do rozgłoszenia na początku następnego ticka.
+    /// Sets a block and records the change for broadcast at the start of the next tick.
     fn set_block_tracked(&mut self, x: i32, y: i32, z: i32, state: u16) -> Option<u16> {
         let old = self.world.set_block(x, y, z, state)?;
         if old != state {
@@ -768,8 +768,8 @@ impl Game {
         Some(old)
     }
 
-    /// `ChunkHolder.broadcastChanges`: 1 zmiana w sekcji -> `block_update`, więcej -> `section_blocks_update`.
-    /// Odbiorcy: gracze mający chunk w widoku i już go otrzymani (`ChunkMap.isChunkTracked`).
+    /// `ChunkHolder.broadcastChanges`: 1 change in a section -> `block_update`, more -> `section_blocks_update`.
+    /// Recipients: players that have the chunk in view and have already received it (`ChunkMap.isChunkTracked`).
     fn flush_block_changes(&mut self) {
         if self.dirty.is_empty() {
             return;
@@ -800,7 +800,7 @@ impl Game {
         }
     }
 
-    /// `AbstractContainerMenu.broadcastChanges`: wysyła `container_set_slot` dla slotów różniących się od stanu znanego klientowi.
+    /// `AbstractContainerMenu.broadcastChanges`: sends `container_set_slot` for slots that differ from the state the client knows.
     fn broadcast_inventory_changes(&mut self, session: u64) {
         let mut out = Vec::new();
         {
@@ -818,7 +818,7 @@ impl Game {
         }
     }
 
-    /// `Player.canInteractWithBlock(pos, extra)`: odległość oka od AABB bloku < (zasięg + extra).
+    /// `Player.canInteractWithBlock(pos, extra)`: distance from the eye to the block AABB < (range + extra).
     fn can_interact_with_block(p: &Player, x: i32, y: i32, z: i32, extra: f64) -> bool {
         let eye = (p.x, p.y + if p.sneaking { 1.27 } else { 1.62 }, p.z);
         let d = |v: f64, lo: i32| (lo as f64 - v).max(v - (lo as f64 + 1.0)).max(0.0);
@@ -827,7 +827,7 @@ impl Game {
         dx * dx + dy * dy + dz * dz < r * r
     }
 
-    /// Czy blok (pełna kostka) nachodzi na hitbox któregoś gracza (`isUnobstructed`; uproszczenie: pełne kostki).
+    /// Whether a block (a full cube) overlaps a player's hitbox (`isUnobstructed`; simplification: full cubes).
     fn block_intersects_player(&self, x: i32, y: i32, z: i32) -> bool {
         self.players.values().any(|p| {
             if p.game_mode == 3 {
@@ -843,23 +843,23 @@ impl Game {
         self.world.dim.min_y + self.world.dim.height
     }
 
-    /// `ServerLevel.mayInteract`: ochrona spawnu działa tylko gdy serwer ma operatorów (jeszcze ich nie ma) + granica świata.
+    /// `ServerLevel.mayInteract`: spawn protection only applies when the server has operators (none yet) + the world border.
     fn may_interact(&self, x: i32, z: i32) -> bool {
         const LIMIT: i32 = 29_999_984;
         x.abs() <= LIMIT && z.abs() <= LIMIT
     }
 
     fn tick_player(&mut self, s: u64) {
-        // ServerGamePacketListenerImpl.tick: potwierdzenie sekwencji bloków wysyłane jako pierwsze
+        // ServerGamePacketListenerImpl.tick: the block sequence acknowledgement is sent first
         let ack = std::mem::replace(&mut self.players.get_mut(&s).unwrap().ack_up_to, -1);
         if ack > -1 {
             self.send(s, &pk::block_changed_ack(ack));
         }
-        // przeciążone gniazdo
+        // overloaded socket
         if self.players[&s].sender.pending.load(Ordering::Relaxed) > MAX_PENDING_BYTES {
             return self.kick(s, Text::translatable("disconnect.timeout"));
         }
-        // ponowne wysłanie teleportu po 20 tickach bez potwierdzenia
+        // resend the teleport after 20 ticks without confirmation
         let tick = self.tick;
         if let Some((_, x, y, z, t)) = self.players[&s].awaiting {
             if tick - t > 20 {
@@ -882,7 +882,7 @@ impl Game {
                 self.send(s, &pk::keep_alive(id));
             }
         }
-        // pierwsze wysłanie zdrowia/doświadczenia (ServerPlayer.doTick: lastSent* = nieprawidłowe)
+        // first sending of health/experience (ServerPlayer.doTick: lastSent* = invalid)
         let first = !self.players[&s].first_tick_done;
         if first {
             self.players.get_mut(&s).unwrap().first_tick_done = true;
@@ -892,7 +892,7 @@ impl Game {
         self.broadcast_inventory_changes(s);
         self.send_next_chunks(s);
         if first {
-            // vanilla wysyła atrybuty gracza dopiero po pierwszej paczce chunków (LivingEntity.updateDirtyAttributes)
+            // vanilla sends the player's attributes only after the first chunk batch (LivingEntity.updateDirtyAttributes)
             let eid = self.players[&s].entity_id;
             let attrs = self.player_attributes();
             self.send(s, &pk::update_attributes(eid, &attrs));
@@ -900,7 +900,7 @@ impl Game {
         self.send_entity_changes(s);
     }
 
-    // ------------------------------------------------------------ pakiety
+    // ------------------------------------------------------------ packets
 
     fn on_packet(&mut self, session: u64, pkt: Serverbound) {
         if !self.players.contains_key(&session) {
@@ -986,7 +986,7 @@ impl Game {
                 let p = self.players.get_mut(&session).unwrap();
                 if p.game_mode == 1 && (0..46).contains(&slot) {
                     p.inventory[slot as usize] = item;
-                    // handleSetCreativeModeSlot: broadcastChanges od razu (echo potwierdzające dla klienta)
+                    // handleSetCreativeModeSlot: broadcastChanges right away (a confirming echo for the client)
                     self.broadcast_inventory_changes(session);
                 }
             }
@@ -1022,7 +1022,7 @@ impl Game {
             (p.awaiting, p.awaiting.map(|a| tick - a.4 > 20).unwrap_or(false))
         };
         if let Some((_, x, y, z, _)) = awaiting {
-            // Dopóki klient nie potwierdzi teleportu, ruch jest ignorowany (ServerGamePacketListenerImpl.handleMovePlayer)
+            // Until the client confirms the teleport, movement is ignored (ServerGamePacketListenerImpl.handleMovePlayer)
             if resend {
                 let (yaw, pitch) = (self.players[&session].yaw, self.players[&session].pitch);
                 self.teleport(session, x, y, z, yaw, pitch);
@@ -1052,7 +1052,7 @@ impl Game {
         p.on_ground = on_ground;
         if pos.is_some() {
             self.update_chunk_tracking(session);
-            // ruch może zmienić widoczność innych graczy (w obie strony)
+            // movement may change the visibility of other players (both ways)
             self.update_entity_tracking(session);
         }
     }
@@ -1067,7 +1067,7 @@ impl Game {
         };
         info!("<{}> {}", self.players[&session].name, msg);
         let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
-        // wiadomość niepodpisana: każdy odbiorca dostaje własny licznik `index`
+        // unsigned message: every recipient gets its own `index` counter
         let sessions: Vec<u64> = self.players.keys().copied().collect();
         for s in sessions {
             let idx = {
@@ -1094,7 +1094,7 @@ impl Game {
         let name = cmd.split_whitespace().next().unwrap_or("");
         match name {
             "list" => {
-                // ListPlayersCommand: translatable z (liczba graczy, max, ComponentUtils.formatList(nazwy))
+                // ListPlayersCommand: a translatable with (player count, max, ComponentUtils.formatList(names))
                 let names: Vec<Text> = self.players.values().map(Self::display_name).collect();
                 let list = match names.len() {
                     0 => Text::empty(),
@@ -1161,7 +1161,7 @@ impl Game {
     }
 
     /// `ServerGamePacketListenerImpl.handlePlayerAction` + `ServerPlayerGameMode.handleBlockBreakAction`.
-    /// Tryb przetrwania: czasy kopania wymagają twardości bloków (M3), więc `STOP_DESTROY_BLOCK` jest przyjmowany bez weryfikacji.
+    /// Survival mode: mining times need block hardness (M3), so `STOP_DESTROY_BLOCK` is accepted without verification.
     fn on_player_action(&mut self, session: u64, action: i32, x: i32, y: i32, z: i32, sequence: i32) {
         match action {
             0..=2 => {
@@ -1197,7 +1197,7 @@ impl Game {
                 }
             }
             2 => {
-                // przetrwanie: zaufanie klientowi (patrz komentarz wyżej); adventure nie niszczy bloków
+                // survival: trust the client (see the comment above); adventure mode does not destroy blocks
                 if gm == 0 {
                     self.destroy_and_ack(session, x, y, z, air);
                 }
@@ -1206,14 +1206,14 @@ impl Game {
         }
     }
 
-    /// `ServerPlayerGameMode.destroyAndAck`: po udanym zniszczeniu zmiana idzie kolejką zmian chunka; po porażce odsyłamy stan.
+    /// `ServerPlayerGameMode.destroyAndAck`: after a successful destroy the change goes through the chunk change queue; on failure the state is sent back.
     fn destroy_and_ack(&mut self, session: u64, x: i32, y: i32, z: i32, air: u16) {
         if self.set_block_tracked(x, y, z, air).is_none() {
             self.resend_block(session, x, y, z);
         }
     }
 
-    /// `ServerGamePacketListenerImpl.handleUseItemOn` + `BlockItem.place` (uproszczone: stan domyślny bloku).
+    /// `ServerGamePacketListenerImpl.handleUseItemOn` + `BlockItem.place` (simplified: the block's default state).
     #[allow(clippy::too_many_arguments)]
     fn on_use_item_on(&mut self, session: u64, hand: i32, x: i32, y: i32, z: i32, face: i32, cursor: (f32, f32, f32), sequence: i32) {
         self.ack_block_changes_up_to(session, sequence);
@@ -1245,11 +1245,11 @@ impl Game {
                 let held = self.players[&session].inventory.get(slot).copied().flatten();
                 let target_air = self.world.palette.is_air(self.world.get_block(px, py, pz));
                 if let (Some((item_id, _)), true) = (held, target_air && py < max_h && py >= self.world.dim.min_y) {
-                    // przedmiot -> blok o tej samej nazwie; stan domyślny (getStateForPlacement: M7)
+                    // item -> block with the same name; default state (getStateForPlacement: M7)
                     let name = self.data.registries.get("minecraft:item").and_then(|r| r.names.get(item_id as usize)).cloned();
                     if let Some(state) = name.and_then(|n| self.data.blocks.default_state(&n)) {
                         if !self.block_intersects_player(px, py, pz) && self.set_block_tracked(px, py, pz, state as u16).is_some() && gm == 0 {
-                            // przetrwanie: zużycie jednego przedmiotu z ręki
+                            // survival: consume one item from the hand
                             let p = self.players.get_mut(&session).unwrap();
                             if let Some((id, c)) = p.inventory[slot] {
                                 p.inventory[slot] = if c > 1 { Some((id, c - 1)) } else { None };
@@ -1262,7 +1262,7 @@ impl Game {
             let msg = Text::translatable("build.tooHigh").with_args(vec![Text::int(max_h - 1)]).color("red");
             self.send(session, &pk::system_chat(&msg, true));
         }
-        // vanilla zawsze odsyła stan klikniętego i sąsiedniego bloku, by klient wycofał przewidywaną zmianę
+        // vanilla always sends back the state of the clicked and the adjacent block so the client reverts its prediction
         self.resend_block(session, x, y, z);
         self.resend_block(session, px, py, pz);
     }
@@ -1293,8 +1293,8 @@ fn version() -> &'static str {
 mod tests {
     use super::*;
 
-    /// Wartości wyliczone wywołaniem prawdziwego `ChunkTrackingView.isWithinDistance` z serwera 1.21.1
-    /// (zdekompilowany jar z mapowaniami Mojang), liczba chunków w kwadracie [-view-3, view+3]^2.
+    /// Values computed by calling the real `ChunkTrackingView.isWithinDistance` from the 1.21.1 server
+    /// (decompiled jar with Mojang mappings), number of chunks in the square [-view-3, view+3]^2.
     #[test]
     fn view_matches_mojang_reference_counts() {
         let reference = [(2, 45), (3, 77), (8, 313), (10, 453), (12, 609), (32, 3653)];
@@ -1312,7 +1312,7 @@ mod tests {
         }
         let v = View { cx: 0, cz: 0, dist: 10 };
         assert!(v.contains(11, 0) && !v.contains(12, 0) && !v.contains(11, 11));
-        // isInViewDistance (bez zewnętrznego pierścienia) wg referencji: 385
+        // isInViewDistance (without the outer ring) per the reference: 385
         let mut n = 0;
         for x in -13..=13 {
             for z in -13..=13 {

@@ -1,5 +1,5 @@
-//! Pakiety stanu `play` (1.21.1). Układ pól odtworzony z zdekompilowanych klas
-//! `net.minecraft.network.protocol.game.*`. Wszystkie funkcje zwracają ładunek `VarInt(id) | body`.
+//! Packets of the `play` state (1.21.1). Field layout reconstructed from the decompiled classes
+//! `net.minecraft.network.protocol.game.*`. All functions return the payload `VarInt(id) | body`.
 
 use crate::buf::{Put, Reader};
 use crate::error::Result;
@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 // ============================================================ clientbound
 
-/// Parametry pakietu Login (`ClientboundLoginPacket` + `CommonPlayerSpawnInfo`).
+/// Parameters of the Login packet (`ClientboundLoginPacket` + `CommonPlayerSpawnInfo`).
 pub struct LoginInfo<'a> {
     pub entity_id: i32,
     pub hardcore: bool,
@@ -22,7 +22,7 @@ pub struct LoginInfo<'a> {
     pub reduced_debug_info: bool,
     pub show_death_screen: bool,
     pub do_limited_crafting: bool,
-    /// ID typu wymiaru w rejestrze `minecraft:dimension_type` (= indeks wpisu).
+    /// Dimension type ID in the `minecraft:dimension_type` registry (= entry index).
     pub dimension_type: i32,
     pub dimension: &'a str,
     pub hashed_seed: i64,
@@ -99,7 +99,7 @@ pub fn set_carried_item(slot: i8) -> Vec<u8> {
     payload(cb::SET_CARRIED_ITEM, |w| w.put_i8(slot))
 }
 
-/// `ClientboundUpdateRecipesPacket` z pustą listą (pełna lista receptur: roadmap).
+/// `ClientboundUpdateRecipesPacket` with an empty list (the full recipe list: see the roadmap).
 pub fn update_recipes_empty() -> Vec<u8> {
     payload(cb::UPDATE_RECIPES, |w| w.put_varint(0))
 }
@@ -111,7 +111,7 @@ pub fn entity_event(entity_id: i32, event: i8) -> Vec<u8> {
     })
 }
 
-/// `ClientboundPlayerPositionPacket`: pozycja, obrót, maska względna, id teleportu.
+/// `ClientboundPlayerPositionPacket`: position, rotation, relative mask, teleport id.
 pub fn player_position(x: f64, y: f64, z: f64, yaw: f32, pitch: f32, relative: u8, teleport_id: i32) -> Vec<u8> {
     payload(cb::PLAYER_POSITION, |w| {
         w.put_f64(x);
@@ -171,20 +171,20 @@ pub fn forget_level_chunk(x: i32, z: i32) -> Vec<u8> {
     payload(cb::FORGET_LEVEL_CHUNK, |w| w.put_i64(chunk_pos_long(x, z)))
 }
 
-/// Dane światła jednego chunka (`ClientboundLightUpdatePacketData`).
+/// Light data of one chunk (`ClientboundLightUpdatePacketData`).
 #[derive(Default, Clone)]
 pub struct LightData {
     pub sky_mask: Vec<u64>,
     pub block_mask: Vec<u64>,
     pub empty_sky_mask: Vec<u64>,
     pub empty_block_mask: Vec<u64>,
-    /// Każda tablica ma dokładnie 2048 bajtów.
+    /// Every array is exactly 2048 bytes.
     pub sky: Vec<[u8; 2048]>,
     pub block: Vec<[u8; 2048]>,
 }
 
 fn put_bitset(w: &mut Vec<u8>, bits: &[u64]) {
-    // BitSet.toLongArray() nie zawiera zer na końcu; writeLongArray => VarInt len + longi
+    // BitSet.toLongArray() has no trailing zeros; writeLongArray => VarInt len + longs
     let mut n = bits.len();
     while n > 0 && bits[n - 1] == 0 {
         n -= 1;
@@ -202,7 +202,7 @@ pub struct BlockEntityInfo {
     pub tag: Option<Tag>,
 }
 
-/// `ClientboundLevelChunkWithLightPacket`. `heightmaps` = korzeń NBT, `sections` = surowe bajty sekcji.
+/// `ClientboundLevelChunkWithLightPacket`. `heightmaps` = NBT root, `sections` = raw section bytes.
 pub fn level_chunk_with_light(x: i32, z: i32, heightmaps: &Compound, sections: &[u8], block_entities: &[BlockEntityInfo], light: &LightData) -> Vec<u8> {
     let mut w = Vec::with_capacity(sections.len() + 8192);
     w.put_varint(cb::LEVEL_CHUNK_WITH_LIGHT);
@@ -241,7 +241,7 @@ pub fn level_chunk_with_light(x: i32, z: i32, heightmaps: &Compound, sections: &
 pub fn set_time(game_time: i64, day_time: i64, daylight_cycle: bool) -> Vec<u8> {
     payload(cb::SET_TIME, |w| {
         w.put_i64(game_time);
-        // konstruktor vanilla: gdy cykl dnia wyłączony, wysyłany jest czas ujemny (min. -1)
+        // vanilla constructor: when the daylight cycle is off a negative time is sent (min. -1)
         let dt = if daylight_cycle { day_time } else if day_time == 0 { -1 } else { -day_time };
         w.put_i64(dt);
     })
@@ -266,7 +266,7 @@ pub struct Border {
 }
 impl Default for Border {
     fn default() -> Self {
-        // WorldBorder.MAX_SIZE = 5.9999968E7, absoluteMaxSize = 29999984, ostrzeżenia 5 bloków / 15 s
+        // WorldBorder.MAX_SIZE = 5.9999968E7, absoluteMaxSize = 29999984, warnings 5 blocks / 15 s
         Self { center_x: 0.0, center_z: 0.0, old_size: 5.9999968E7, new_size: 5.9999968E7, lerp_time: 0, absolute_max_size: 29999984, warning_blocks: 5, warning_time: 15 }
     }
 }
@@ -283,7 +283,7 @@ pub fn initialize_border(b: &Border) -> Vec<u8> {
     })
 }
 
-/// `ClientboundTickingStatePacket` (częstotliwość ticków + zamrożenie).
+/// `ClientboundTickingStatePacket` (tick rate + frozen flag).
 pub fn ticking_state(tick_rate: f32, frozen: bool) -> Vec<u8> {
     payload(cb::TICKING_STATE, |w| {
         w.put_f32(tick_rate);
@@ -293,11 +293,11 @@ pub fn ticking_state(tick_rate: f32, frozen: bool) -> Vec<u8> {
 pub fn ticking_step(steps: i32) -> Vec<u8> {
     payload(cb::TICKING_STEP, |w| w.put_varint(steps))
 }
-/// Ogranicznik paczki (`ClientboundBundlePacket` = delimiter, pakiety, delimiter).
+/// Bundle delimiter (`ClientboundBundlePacket` = delimiter, packets, delimiter).
 pub fn bundle_delimiter() -> Vec<u8> {
     payload(cb::BUNDLE_DELIMITER, |_| {})
 }
-/// `ClientboundUpdateAttributesPacket` bez modyfikatorów: (id atrybutu w rejestrze, wartość bazowa).
+/// `ClientboundUpdateAttributesPacket` without modifiers: (attribute registry id, base value).
 pub fn update_attributes(entity_id: i32, attributes: &[(i32, f64)]) -> Vec<u8> {
     payload(cb::UPDATE_ATTRIBUTES, |w| {
         w.put_varint(entity_id);
@@ -305,7 +305,7 @@ pub fn update_attributes(entity_id: i32, attributes: &[(i32, f64)]) -> Vec<u8> {
         for (id, base) in attributes {
             w.put_varint(*id);
             w.put_f64(*base);
-            w.put_varint(0); // brak modyfikatorów
+            w.put_varint(0); // no modifiers
         }
     })
 }
@@ -338,7 +338,7 @@ pub fn server_data(motd: &Text, icon: Option<&[u8]>) -> Vec<u8> {
     })
 }
 
-/// Wpis `player_info_update`. Akcje wysyłane są w ustalonej kolejności enumu.
+/// An entry of `player_info_update`. Actions are written in the fixed enum order.
 pub struct PlayerInfoEntry<'a> {
     pub uuid: Uuid,
     pub name: &'a str,
@@ -357,11 +357,11 @@ pub mod player_info_action {
     /// `createPlayerInitializing`: ADD_PLAYER, INITIALIZE_CHAT, UPDATE_GAME_MODE, UPDATE_LISTED, UPDATE_LATENCY, UPDATE_DISPLAY_NAME
     pub const INITIALIZING: u8 = 0b11_1111;
 }
-/// Domyślnie `actions` = `INITIALIZING` (jak `ClientboundPlayerInfoUpdatePacket.createPlayerInitializing`).
+/// Usually `actions` = `INITIALIZING` (like `ClientboundPlayerInfoUpdatePacket.createPlayerInitializing`).
 pub fn player_info_update(actions: u8, entries: &[PlayerInfoEntry<'_>]) -> Vec<u8> {
     use player_info_action as a;
     payload(cb::PLAYER_INFO_UPDATE, |w| {
-        w.put_u8(actions); // EnumSet jako stały BitSet: ceil(6/8) = 1 bajt
+        w.put_u8(actions); // EnumSet as a fixed BitSet: ceil(6/8) = 1 byte
         w.put_varint(entries.len() as i32);
         for e in entries {
             w.put_uuid(e.uuid);
@@ -393,7 +393,7 @@ pub fn player_info_update(actions: u8, entries: &[PlayerInfoEntry<'_>]) -> Vec<u
                 w.put_varint(e.latency);
             }
             if actions & a::UPDATE_DISPLAY_NAME != 0 {
-                w.put_bool(false); // brak nazwy wyświetlanej
+                w.put_bool(false); // no display name
             }
         }
     })
@@ -408,7 +408,7 @@ pub fn player_info_remove(uuids: &[Uuid]) -> Vec<u8> {
     })
 }
 
-/// Kąt jako bajt: `(int)(deg * 256 / 360)` (zgodnie z `ClientboundAddEntityPacket`/`TeleportEntity`).
+/// Angle as a byte: `(int)(deg * 256 / 360)` (like `ClientboundAddEntityPacket`/`TeleportEntity`).
 pub fn angle_byte(deg: f32) -> i8 {
     ((deg * 256.0 / 360.0) as i32) as i8
 }
@@ -492,7 +492,7 @@ pub fn rotate_head(id: i32, head_yaw: f32) -> Vec<u8> {
     })
 }
 
-/// Wartość metadanych encji. Serializator: 0 = BYTE, 1 = INT, 3 = FLOAT, 8 = BOOLEAN (kolejność `EntityDataSerializers`).
+/// Entity metadata value. Serializer: 0 = BYTE, 1 = INT, 3 = FLOAT, 8 = BOOLEAN (`EntityDataSerializers` order).
 pub enum EntityData {
     Byte(i8),
     Int(i32),
@@ -552,7 +552,7 @@ pub fn set_experience(progress: f32, level: i32, total: i32) -> Vec<u8> {
     })
 }
 
-/// `ItemStack.OPTIONAL_STREAM_CODEC` bez komponentów: count, id, 0 dodanych, 0 usuniętych (puste = VarInt 0).
+/// `ItemStack.OPTIONAL_STREAM_CODEC` without components: count, id, 0 added, 0 removed (empty = VarInt 0).
 pub fn put_item_stack(w: &mut Vec<u8>, item: Option<(i32, i32)>) {
     match item {
         Some((id, count)) if count > 0 => {
@@ -575,7 +575,7 @@ pub fn container_set_slot(container_id: u8, state_id: i32, slot: i16, item: Opti
     })
 }
 
-/// `ClientboundSectionBlocksUpdatePacket`: pozycja sekcji + wpisy `(stan << 12) | (x<<8 | z<<4 | y)`.
+/// `ClientboundSectionBlocksUpdatePacket`: section position + entries `(state << 12) | (x<<8 | z<<4 | y)`.
 pub fn section_blocks_update(sx: i32, sy: i32, sz: i32, changes: &[(u16, u32)]) -> Vec<u8> {
     payload(cb::SECTION_BLOCKS_UPDATE, |w| {
         let pos = (((sx as i64) & 0x3FFFFF) << 42) | ((sy as i64) & 0xFFFFF) | (((sz as i64) & 0x3FFFFF) << 20);
@@ -600,8 +600,8 @@ pub fn container_set_content_empty(container_id: u8, state_id: i32, slots: usize
     })
 }
 
-/// Niepodpisana wiadomość gracza (`PlayerChatMessage.unsigned`): brak sygnatury, pusty `lastSeen`,
-/// maska filtra PASS_THROUGH. `chat_type_id` = indeks wpisu w `minecraft:chat_type` (wysyłany jako id+1).
+/// An unsigned player message (`PlayerChatMessage.unsigned`): no signature, empty `lastSeen`,
+/// PASS_THROUGH filter mask. `chat_type_id` = entry index in `minecraft:chat_type` (sent as id+1).
 pub fn player_chat_unsigned(sender: Uuid, index: i32, content: &str, timestamp_ms: i64, chat_type_id: i32, sender_name: &Text) -> Vec<u8> {
     payload(cb::PLAYER_CHAT, |w| {
         w.put_uuid(sender);
@@ -610,7 +610,7 @@ pub fn player_chat_unsigned(sender: Uuid, index: i32, content: &str, timestamp_m
         w.put_string(content); // SignedMessageBody.Packed.content (<=256)
         w.put_i64(timestamp_ms);
         w.put_i64(0); // salt
-        w.put_varint(0); // lastSeen: 0 wpisów
+        w.put_varint(0); // lastSeen: 0 entries
         w.put_bool(false); // unsignedContent
         w.put_varint(0); // FilterMask.PASS_THROUGH
         w.put_varint(chat_type_id + 1); // Holder<ChatType>: id+1
@@ -625,7 +625,7 @@ pub fn player_chat_unsigned(sender: Uuid, index: i32, content: &str, timestamp_m
 pub enum Serverbound {
     AcceptTeleportation(i32),
     ChatCommand(String),
-    /// Podpisane polecenie: bierzemy tylko tekst (sygnatur argumentów nie weryfikujemy).
+    /// Signed command: only the text is used (argument signatures are not verified).
     ChatCommandSigned(String),
     Chat(String),
     ChatSessionUpdate,
@@ -649,7 +649,7 @@ pub enum Serverbound {
     UseItemOn { hand: i32, x: i32, y: i32, z: i32, face: i32, cursor: (f32, f32, f32), inside: bool, sequence: i32 },
     UseItem { hand: i32, sequence: i32, yaw: f32, pitch: f32 },
     CustomPayload { channel: String, data: Vec<u8> },
-    /// Pakiet znany, ale (jeszcze) nieobsługiwany przez port.
+    /// A known packet that the port does not (yet) handle.
     Unhandled(i32),
 }
 
@@ -684,7 +684,7 @@ pub fn decode_serverbound(id: i32, body: &[u8]) -> Result<Serverbound> {
             let slot = r.i16()?;
             let count = r.varint()?;
             let item = if count <= 0 { None } else { Some((r.varint()?, count)) };
-            // Komponenty (DataComponentPatch) pomijamy: wymagają dekodera każdego typu komponentu.
+            // Components (DataComponentPatch) are skipped: they need a decoder for every component type.
             Serverbound::SetCreativeModeSlot { slot, item }
         }
         sb::SWING => Serverbound::Swing { hand: r.varint()? },

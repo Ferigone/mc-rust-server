@@ -1,4 +1,4 @@
-//! Przygotowanie (raz, przy starcie) pakietów fazy configuration z oficjalnych danych.
+//! Preparation (once, at startup) of the configuration-phase packets from the official data.
 
 use mc_data::{GameData, SYNCHRONIZED_REGISTRIES};
 use mc_protocol::packets::{self, KnownPack, RegistryEntry};
@@ -11,9 +11,9 @@ pub struct ConfigPackets {
     pub features: Vec<u8>,
     pub select_known_packs: Vec<u8>,
     pub known_packs: Vec<KnownPack>,
-    /// Wpisy bez danych (klient użyje własnych z paczki `minecraft:core`).
+    /// Entries without data (the client uses its own from the `minecraft:core` pack).
     pub registry_known: Vec<Vec<u8>>,
-    /// Wpisy z pełnymi danymi NBT (gdy klient nie ma identycznej paczki).
+    /// Entries with full NBT data (when the client does not have an identical pack).
     pub registry_full: Vec<Vec<u8>>,
     pub tags: Vec<u8>,
     pub finish: Vec<u8>,

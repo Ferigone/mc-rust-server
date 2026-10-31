@@ -4,7 +4,7 @@ import it.unimi.dsi.fastutil.ints.IntList;
 import java.util.Map;
 import net.minecraft.resources.ResourceLocation;
 
-/** Pomocnik w pakiecie net.minecraft.tags: odsłania prywatne pole `tags` ładunku sieciowego. */
+/** Helper in the net.minecraft.tags package: exposes the package-private `tags` field of the network payload. */
 public final class TagsAccess {
     private TagsAccess() {}
 

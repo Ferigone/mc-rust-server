@@ -1,4 +1,4 @@
-//! Serwer Minecraft Java 1.21.1 (protokół 767) napisany w Rust — port serwera vanilla.
+//! Minecraft Java 1.21.1 (protocol 767) server written in Rust: a port of the vanilla server.
 
 mod auth;
 mod config;
@@ -33,7 +33,7 @@ fn find_data_dir(arg: Option<PathBuf>) -> Result<PathBuf> {
     }
     anyhow::bail!(
         "Nie znaleziono danych referencyjnych. Uruchom `tools/fetch_reference.sh` (pobiera serwer od Mojang i uruchamia oficjalny data generator) \
-         albo wskaż katalog przez --data <dir> / MC_DATA_DIR."
+         or point to the directory with --data <dir> / MC_DATA_DIR."
     )
 }
 
@@ -49,13 +49,13 @@ fn main() -> Result<()> {
             "--dir" => run_dir = args.next().map(PathBuf::from),
             "nogui" | "--nogui" => {}
             "-h" | "--help" => {
-                println!("mc-server [--data <katalog generated>] [--dir <katalog serwera>]");
+                println!("mc-server [--data <generated dir>] [--dir <server dir>]");
                 return Ok(());
             }
-            other => anyhow::bail!("nieznany argument: {other}"),
+            other => anyhow::bail!("unknown argument: {other}"),
         }
     }
-    // Ścieżkę danych rozwiązujemy względem bieżącego katalogu, zanim go zmienimy.
+    // Resolve the data path relative to the current directory before changing it.
     let data_dir = find_data_dir(data_arg)?.canonicalize()?;
     if let Some(d) = &run_dir {
         std::fs::create_dir_all(d)?;
@@ -67,20 +67,20 @@ fn main() -> Result<()> {
     info!("Starting minecraft server version {} (protocol {})", net::VERSION_NAME, mc_protocol::ids::PROTOCOL_VERSION);
 
     let t0 = std::time::Instant::now();
-    let data = Arc::new(GameData::load(&data_dir).context("ładowanie danych gry")?);
+    let data = Arc::new(GameData::load(&data_dir).context("loading game data")?);
     let config = prepare::ConfigPackets::build(&data);
     info!(
-        "Dane gry wczytane w {} ms ({} bloków, {} stanów, {} rejestrów statycznych)",
+        "Game data loaded in {} ms ({} blocks, {} states, {} static registries)",
         t0.elapsed().as_millis(),
         data.blocks.list.len(),
         data.blocks.state_count,
         data.registries.len()
     );
 
-    // --- świat (superflat; generator normalny i wczytywanie Anvil: roadmap)
+    // --- world (superflat; normal generator and Anvil loading: see the roadmap)
     let dim_json = &data.dynamic_registry("minecraft:dimension_type").unwrap().entries.iter().find(|e| e.id == "minecraft:overworld").unwrap().json;
     let dim = world::Dimension { min_y: dim_json["min_y"].as_i64().unwrap() as i32, height: dim_json["height"].as_i64().unwrap() as i32 };
-    let st = |n: &str| data.blocks.default_state(n).unwrap_or_else(|| panic!("brak bloku {n}"));
+    let st = |n: &str| data.blocks.default_state(n).unwrap_or_else(|| panic!("missing block {n}"));
     let palette = world::Palette {
         air: st("minecraft:air") as u16,
         cave_air: st("minecraft:cave_air") as u16,
@@ -103,12 +103,12 @@ fn main() -> Result<()> {
         attr_block_range: data.registry_id("minecraft:attribute", "minecraft:player.block_interaction_range").unwrap(),
     };
 
-    // Ikona serwera: vanilla wymaga PNG 64x64 (inaczej ją pomija). Uwaga: vanilla koduje PNG ponownie przez
-    // ImageIO, my wysyłamy plik bez zmian — obraz identyczny, bajty base64 mogą się różnić.
+    // Server icon: vanilla requires a 64x64 PNG (otherwise it skips it). Note: vanilla re-encodes the PNG through
+    // ImageIO, we send the file unchanged: the image is identical, the base64 bytes may differ.
     let favicon = std::fs::read("server-icon.png").ok().and_then(|b| {
         let ok = b.len() > 24 && &b[..8] == b"\x89PNG\r\n\x1a\n" && u32::from_be_bytes(b[16..20].try_into().unwrap()) == 64 && u32::from_be_bytes(b[20..24].try_into().unwrap()) == 64;
         if !ok {
-            tracing::warn!("server-icon.png musi być obrazem PNG 64x64 — pomijam");
+            tracing::warn!("server-icon.png must be a 64x64 PNG image, skipping it");
         }
         ok.then(|| format!("data:image/png;base64,{}", base64(&b)))
     });

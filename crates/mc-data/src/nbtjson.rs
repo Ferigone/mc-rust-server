@@ -1,7 +1,7 @@
-//! Konwersja JSON (format datapacków) -> NBT. Odpowiada ścieżce vanilla `codec.encodeStart(NbtOps)`
-//! z jedną różnicą: nie znamy typów pól z kodeków, więc liczby całkowite są `Int`/`Long`,
-//! a ułamkowe `Double`. Klient dekoduje liczby z NbtOps tolerancyjnie (każdy `NumericTag`),
-//! więc jest to równoważne semantycznie; bajty mogą się różnić od vanilla typem znacznika.
+//! JSON (data-pack format) -> NBT conversion. Corresponds to the vanilla path `codec.encodeStart(NbtOps)`
+//! with one difference: codec field types are unknown here, so integers are `Int`/`Long`
+//! and fractional numbers are `Double`. The client decodes numbers from NbtOps leniently (any `NumericTag`),
+//! so this is semantically equivalent; the bytes may differ from vanilla in the tag type.
 
 use mc_protocol::nbt::{Compound, Tag};
 use serde_json::Value;
@@ -30,8 +30,8 @@ pub fn json_to_nbt(v: &Value) -> Tag {
     }
 }
 
-/// Lista NBT musi być jednorodna: mieszane liczby promujemy do `Double`/`Long`,
-/// a mieszane typy opakowujemy tak jak `NbtOps` (compound z kluczem pustym).
+/// An NBT list must be homogeneous: mixed numbers are promoted to `Double`/`Long`,
+/// and mixed types are wrapped like `NbtOps` does (a compound with an empty key).
 fn unify_list(items: Vec<Tag>) -> Vec<Tag> {
     let Some(first) = items.first() else { return items };
     let id = first.id();

@@ -1,6 +1,6 @@
-//! Tagi: `data/minecraft/tags/<rejestr>/<tag>.json` -> listy ID do pakietu `update_tags`.
-//! Wysyłamy rejestry statyczne (wbudowane) oraz synchronizowane dynamiczne, tylko niepuste
-//! (jak `TagNetworkSerialization.serializeTagsToNetwork`).
+//! Tags: `data/minecraft/tags/<registry>/<tag>.json` -> ID lists for the `update_tags` packet.
+//! We send static (built-in) registries and synchronized dynamic ones, non-empty only
+//! (like `TagNetworkSerialization.serializeTagsToNetwork`).
 
 use crate::{DynamicRegistry, StaticRegistry};
 use anyhow::{Context, Result};
@@ -15,12 +15,12 @@ pub fn build(
     statics: &HashMap<String, StaticRegistry>,
     dynamics: &[DynamicRegistry],
 ) -> Result<Vec<(String, Vec<(String, Vec<i32>)>)>> {
-    // Znane nazwy rejestrów (bez prefiksu `minecraft:`) do rozpoznania, gdzie kończy się nazwa rejestru, a zaczyna tag.
+    // Known registry names (without the `minecraft:` prefix) used to tell where the registry name ends and the tag begins.
     let mut known: HashSet<String> = statics.keys().map(|k| k.trim_start_matches("minecraft:").to_owned()).collect();
     for d in dynamics {
         known.insert(d.name.trim_start_matches("minecraft:").to_owned());
     }
-    // Rejestry z tagami, które nie są sieciowe (np. worldgen/structure) też rozpoznajemy, by je pominąć.
+    // Registries with tags that are not networked (e.g. worldgen/structure) are recognised too, so they can be skipped.
     for extra in ["worldgen/structure", "worldgen/world_preset", "worldgen/flat_level_generator_preset"] {
         known.insert(extra.to_owned());
     }
@@ -31,7 +31,7 @@ pub fn build(
     for path in files {
         let rel = path.strip_prefix(tags_dir)?.to_string_lossy().replace('\\', "/");
         let rel = rel.strip_suffix(".json").unwrap_or(&rel);
-        // najdłuższy pasujący prefiks = rejestr
+        // longest matching prefix = registry
         let mut best: Option<&String> = None;
         for k in &known {
             if rel.starts_with(&format!("{k}/")) && best.is_none_or(|b| k.len() > b.len()) {

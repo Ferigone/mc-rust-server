@@ -1,4 +1,4 @@
-//! Tryb online: klucz RSA serwera, szyfrowanie AES (wspólny sekret), weryfikacja sesji u Mojang.
+//! Online mode: the server's RSA key, AES encryption (shared secret), session verification with Mojang.
 
 use anyhow::{anyhow, bail, Result};
 use mc_protocol::packets::GameProfile;
@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 pub struct ServerKey {
     private: RsaPrivateKey,
-    /// Klucz publiczny w DER (X.509 SubjectPublicKeyInfo) — dokładnie to, co wysyła vanilla.
+    /// Public key in DER (X.509 SubjectPublicKeyInfo), exactly what vanilla sends.
     pub public_der: Vec<u8>,
 }
 
@@ -22,16 +22,16 @@ impl ServerKey {
         Ok(Self { private, public_der })
     }
 
-    /// Odszyfrowuje sekret i token. Zwraca (sekret AES, czy token się zgadza).
+    /// Decrypts the secret and token. Returns (AES secret, whether the token matches).
     pub fn decrypt(&self, secret_enc: &[u8], token_enc: &[u8], expected_token: &[u8]) -> Result<([u8; 16], bool)> {
         let token = self.private.decrypt(Pkcs1v15Encrypt, token_enc).map_err(|e| anyhow!("token: {e}"))?;
-        let secret = self.private.decrypt(Pkcs1v15Encrypt, secret_enc).map_err(|e| anyhow!("sekret: {e}"))?;
-        let secret: [u8; 16] = secret.try_into().map_err(|_| anyhow!("sekret ma zły rozmiar"))?;
+        let secret = self.private.decrypt(Pkcs1v15Encrypt, secret_enc).map_err(|e| anyhow!("secret: {e}"))?;
+        let secret: [u8; 16] = secret.try_into().map_err(|_| anyhow!("secret has the wrong size"))?;
         Ok((secret, token == expected_token))
     }
 }
 
-/// `new BigInteger(sha1_bytes).toString(16)` — hex ze znakiem w kodzie uzupełnień do dwóch.
+/// `new BigInteger(sha1_bytes).toString(16)`: signed hex in two's complement.
 pub fn minecraft_hex_digest(parts: &[&[u8]]) -> String {
     let mut h = Sha1::new();
     for p in parts {
@@ -40,7 +40,7 @@ pub fn minecraft_hex_digest(parts: &[&[u8]]) -> String {
     let mut d: [u8; 20] = h.finalize().into();
     let negative = d[0] & 0x80 != 0;
     if negative {
-        // uzupełnienie do dwóch
+        // two's complement
         let mut carry = true;
         for b in d.iter_mut().rev() {
             *b = !*b;
@@ -68,8 +68,8 @@ pub fn server_hash(server_id: &str, secret: &[u8; 16], public_der: &[u8]) -> Str
 
 const DEFAULT_SESSION_URL: &str = "https://sessionserver.mojang.com/session/minecraft/hasJoined";
 
-/// `hasJoinedServer`. `Ok(None)` = gracz nie dołączył (204); `Err` = serwery niedostępne.
-/// URL można nadpisać zmienną `MC_SESSION_URL` (testy z atrapą serwera sesji).
+/// `hasJoinedServer`. `Ok(None)` = the player has not joined (204); `Err` = servers unavailable.
+/// The URL can be overridden with `MC_SESSION_URL` (tests with a mock session server).
 pub fn has_joined(name: &str, hash: &str, ip: Option<std::net::IpAddr>) -> Result<Option<GameProfile>> {
     let base = std::env::var("MC_SESSION_URL").unwrap_or_else(|_| DEFAULT_SESSION_URL.to_owned());
     let mut req = ureq::get(&base).query("username", name).query("serverId", hash);
@@ -87,8 +87,8 @@ pub fn has_joined(name: &str, hash: &str, ip: Option<std::net::IpAddr>) -> Resul
         return Ok(None);
     }
     let v: serde_json::Value = serde_json::from_reader(resp.into_reader())?;
-    let id = Uuid::parse_str(v["id"].as_str().ok_or_else(|| anyhow!("brak id"))?)?;
-    let name = v["name"].as_str().ok_or_else(|| anyhow!("brak name"))?.to_owned();
+    let id = Uuid::parse_str(v["id"].as_str().ok_or_else(|| anyhow!("missing id"))?)?;
+    let name = v["name"].as_str().ok_or_else(|| anyhow!("missing name"))?.to_owned();
     let properties = v["properties"]
         .as_array()
         .map(|a| {
@@ -106,7 +106,7 @@ pub fn has_joined(name: &str, hash: &str, ip: Option<std::net::IpAddr>) -> Resul
 mod tests {
     use super::*;
 
-    // Wektory z dokumentacji protokołu (hash nazwy: sha1(name) jako BigInteger hex).
+    // Vectors from the protocol documentation (name hash: sha1(name) as BigInteger hex).
     #[test]
     fn hex_digest_vectors() {
         assert_eq!(minecraft_hex_digest(&[b"Notch"]), "4ed1f46bbe04bc756bcb17c0c7ce3e4632f06a48");

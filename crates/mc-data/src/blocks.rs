@@ -1,4 +1,4 @@
-//! Stany bloków z `blocks.json` (oficjalny raport): ID stanów, właściwości, stan domyślny.
+//! Block states from `blocks.json` (the official report): state IDs, properties, default state.
 
 use anyhow::{Context, Result};
 use std::collections::HashMap;
@@ -10,7 +10,7 @@ pub struct BlockInfo {
     pub default_state: u32,
     pub min_state: u32,
     pub max_state: u32,
-    /// Właściwości w kolejności z raportu: (nazwa, możliwe wartości).
+    /// Properties in report order: (name, possible values).
     pub properties: Vec<(String, Vec<String>)>,
 }
 
@@ -18,7 +18,7 @@ pub struct BlockInfo {
 pub struct Blocks {
     pub list: Vec<BlockInfo>,
     pub by_name: HashMap<String, usize>,
-    /// state id -> indeks bloku
+    /// state id -> block index
     state_to_block: Vec<u32>,
     pub state_count: u32,
 }
@@ -54,7 +54,7 @@ impl Blocks {
             max_state = max_state.max(max);
             list.push(BlockInfo { name: name.clone(), default_state: def.context("no default state")?, min_state: min, max_state: max, properties });
         }
-        // Kolejność bloków = kolejność rejestru; sortujemy po minimalnym ID stanu (stany są ciągłe per blok).
+        // Block order = registry order; sort by the minimum state ID (states are contiguous per block).
         list.sort_by_key(|b| b.min_state);
         let mut by_name = HashMap::new();
         let mut state_to_block = vec![0u32; max_state as usize + 1];

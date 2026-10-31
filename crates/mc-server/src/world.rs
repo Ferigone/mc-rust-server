@@ -1,6 +1,6 @@
-//! Świat: chunki, sekcje, generator superflat, kodowanie pakietu chunka.
+//! World: chunks, sections, the superflat generator, chunk packet encoding.
 //!
-//! Format sekcji i kontenerów paletowanych odtworzony z `LevelChunkSection.write`,
+//! The section and paletted container format reconstructed from `LevelChunkSection.write`,
 //! `PalettedContainer` (strategie SECTION_STATES / SECTION_BIOMES) i `SimpleBitStorage`.
 
 use mc_protocol::frame::FrameEncoder;
@@ -22,21 +22,21 @@ impl Dimension {
     pub fn sections(&self) -> usize {
         (self.height / 16) as usize
     }
-    /// Sekcje światła: wszystkie sekcje + 1 poniżej + 1 powyżej.
+    /// Light sections: all sections + 1 below + 1 above.
     pub fn light_sections(&self) -> usize {
         self.sections() + 2
     }
 }
 
-/// Stałe stanów/biomów potrzebne do kodowania.
+/// State/biome constants needed for encoding.
 #[derive(Debug, Clone)]
 pub struct Palette {
     pub air: u16,
     pub cave_air: u16,
     pub void_air: u16,
-    /// Liczba stanów bloków (bity globalnej palety = ceillog2).
+    /// Number of block states (global palette bits = ceillog2).
     pub block_state_count: u32,
-    /// Liczba biomów w rejestrze (bity globalnej palety biomów = ceillog2); używane przy niejednolitych biomach.
+    /// Number of biomes in the registry (global biome palette bits = ceillog2); used for non-uniform biomes.
     #[allow(dead_code)]
     pub biome_count: u32,
 }
@@ -70,7 +70,7 @@ pub enum Blocks {
 #[derive(Clone)]
 pub struct Section {
     pub blocks: Blocks,
-    /// Biom całej sekcji (ID w rejestrze `minecraft:worldgen/biome`). Siatka 4x4x4 na razie jednolita.
+    /// Biome of the whole section (ID in the `minecraft:worldgen/biome` registry). The 4x4x4 grid is uniform for now.
     pub biome: u16,
 }
 
@@ -97,7 +97,7 @@ impl Section {
 #[derive(Clone)]
 pub struct Chunk {
     pub sections: Vec<Section>,
-    /// Zbuforowana ramka pakietu (ze współrzędnymi); unieważniana przy zmianie bloku.
+    /// Cached packet frame (including coordinates); invalidated when a block changes.
     cached: Option<Arc<Vec<u8>>>,
 }
 
@@ -108,7 +108,7 @@ impl Chunk {
     }
 }
 
-/// Zasób potrzebny do zbudowania pakietu.
+/// Context needed to build a packet.
 pub struct EncodeCtx<'a> {
     pub dim: Dimension,
     pub palette: &'a Palette,
@@ -116,7 +116,7 @@ pub struct EncodeCtx<'a> {
 
 // ------------------------------------------------------------------ kodowanie
 
-/// Pakuje wartości do `long`ów jak `SimpleBitStorage` (bez przechodzenia wartości przez granicę longa).
+/// Packs values into `long`s like `SimpleBitStorage` (values never straddle a long boundary).
 fn pack_bits(values: impl Iterator<Item = u32>, count: usize, bits: u32) -> Vec<i64> {
     let per_long = (64 / bits) as usize;
     let mut out = vec![0i64; count.div_ceil(per_long)];
@@ -126,8 +126,8 @@ fn pack_bits(values: impl Iterator<Item = u32>, count: usize, bits: u32) -> Vec<
     out
 }
 
-/// `front`: stan umieszczany na początku palety, o ile występuje. Sekcja vanilla powstaje jako paleta
-/// jednowartościowa z powietrzem, więc po dopisaniu kolejnych bloków powietrze ma indeks 0.
+/// `front`: a state placed at the start of the palette if present. A vanilla section starts as a palette
+/// holding only air, so after more blocks are added air has index 0.
 fn write_container(w: &mut Vec<u8>, values: &[u16], bits_cfg: ContainerKind, global_bits: u32, front: Option<u16>) {
     let mut palette: Vec<u16> = Vec::new();
     let mut overflow = false;
@@ -144,11 +144,11 @@ fn write_container(w: &mut Vec<u8>, values: &[u16], bits_cfg: ContainerKind, glo
     if !overflow && palette.len() == 1 {
         w.put_u8(0);
         w.put_varint(palette[0] as i32);
-        w.put_varint(0); // pusta tablica longów (ZeroBitStorage)
+        w.put_varint(0); // empty long array (ZeroBitStorage)
         return;
     }
     if overflow {
-        // paleta globalna: wartości zapisywane wprost, bez listy palety
+        // global palette: values are written directly, without a palette list
         w.put_u8(global_bits as u8);
         let longs = pack_bits(values.iter().map(|&v| v as u32), values.len(), global_bits);
         w.put_long_array(&longs);
@@ -174,9 +174,9 @@ fn write_container(w: &mut Vec<u8>, values: &[u16], bits_cfg: ContainerKind, glo
 #[allow(dead_code)]
 #[derive(Clone, Copy)]
 enum ContainerKind {
-    /// SECTION_STATES: 1..=4 bitów -> liniowa (zawsze 4 bity), 5..=8 -> hashmap, więcej -> globalna
+    /// SECTION_STATES: 1..=4 bits -> linear (always 4 bits), 5..=8 -> hashmap, more -> global
     States,
-    /// SECTION_BIOMES: 1..=3 bity -> liniowa, więcej -> globalna
+    /// SECTION_BIOMES: 1..=3 bits -> linear, more -> global
     Biomes,
 }
 impl ContainerKind {
@@ -215,14 +215,14 @@ fn encode_section(w: &mut Vec<u8>, s: &Section, p: &Palette) {
         }
         Blocks::Full(b) => write_container(w, &b[..], ContainerKind::States, p.global_block_bits(), Some(p.air)),
     }
-    // biomy: 64 komórek (4x4x4), tu jednolite
+    // biomes: 64 cells (4x4x4), uniform here
     w.put_u8(0);
     w.put_varint(s.biome as i32);
     w.put_varint(0);
 }
 
 fn heightmap(chunk: &Chunk, dim: &Dimension, p: &Palette) -> Vec<i64> {
-    // WORLD_SURFACE i MOTION_BLOCKING: dla superflat (same pełne bloki) wystarczy "pierwszy nie-powietrze od góry".
+    // WORLD_SURFACE and MOTION_BLOCKING: for superflat (only full blocks) "first non-air from the top" is enough.
     let mut vals = [0u32; 256];
     for z in 0..16usize {
         for x in 0..16usize {
@@ -248,8 +248,8 @@ fn heightmap(chunk: &Chunk, dim: &Dimension, p: &Palette) -> Vec<i64> {
     pack_bits(vals.iter().copied(), 256, bits)
 }
 
-/// Prosta propagacja światła nieba: kolumna 15 nad najwyższym nieprzezroczystym blokiem, 0 pod nim.
-/// (Pełny silnik światła vanilla — roadmap.)
+/// Simple sky light propagation: 15 above the highest opaque block of a column, 0 below it.
+/// (The full vanilla light engine: see the roadmap.)
 fn skylight(chunk: &Chunk, dim: &Dimension, p: &Palette) -> LightData {
     let n = dim.light_sections();
     let mut light = LightData::default();
@@ -257,7 +257,7 @@ fn skylight(chunk: &Chunk, dim: &Dimension, p: &Palette) -> LightData {
     light.empty_sky_mask = vec![0; n.div_ceil(64)];
     light.block_mask = vec![0; n.div_ceil(64)];
     light.empty_block_mask = vec![0; n.div_ceil(64)];
-    // wysokość pierwszego nieprzezroczystego bloku w kolumnie (indeks względny od min_y, wyłącznie)
+    // height of the first opaque block in the column (index relative to min_y, exclusive)
     let mut top = [0usize; 256];
     for z in 0..16usize {
         for x in 0..16usize {
@@ -273,9 +273,9 @@ fn skylight(chunk: &Chunk, dim: &Dimension, p: &Palette) -> LightData {
             top[x + z * 16] = h;
         }
     }
-    // Silnik światła vanilla trzyma warstwy tylko dla sekcji niepustych oraz ich pionowych sąsiadów:
-    // od sekcji poniżej świata do jednej nad najwyższą niepustą (zmierzone na prawdziwym serwerze 1.21.1).
-    // Wyżej klient przyjmuje pełne światło nieba bez danych.
+    // The vanilla light engine keeps layers only for non-empty sections and their vertical neighbours:
+    // from the section below the world to one above the highest non-empty one (measured on the real 1.21.1 server).
+    // Above that the client assumes full sky light without data.
     let top_nonempty = (0..dim.sections()).rev().find(|&sy| {
         let sec = &chunk.sections[sy];
         match &sec.blocks {
@@ -283,16 +283,16 @@ fn skylight(chunk: &Chunk, dim: &Dimension, p: &Palette) -> LightData {
             Blocks::Full(b) => b.iter().any(|&v| !p.is_air(v)),
         }
     });
-    let active_end = top_nonempty.map_or(1, |t| t + 2).min(n - 1); // indeks sekcji światła włącznie
+    let active_end = top_nonempty.map_or(1, |t| t + 2).min(n - 1); // light section index, inclusive
     for ls in 0..=active_end {
-        // ls = 0 -> sekcja poniżej świata; ls = n-1 -> powyżej
+        // ls = 0 -> section below the world; ls = n-1 -> above
         let mut arr = [0u8; 2048];
         let mut any = false;
         for z in 0..16usize {
             for x in 0..16usize {
                 let t = top[x + z * 16] as i32;
                 for ly in 0..16usize {
-                    let rel_y = (ls as i32 - 1) * 16 + ly as i32; // y względem min_y
+                    let rel_y = (ls as i32 - 1) * 16 + ly as i32; // y relative to min_y
                     if rel_y >= t {
                         let idx = (ly << 8) | (z << 4) | x;
                         arr[idx >> 1] |= 0x0F << ((idx & 1) * 4);
@@ -307,13 +307,13 @@ fn skylight(chunk: &Chunk, dim: &Dimension, p: &Palette) -> LightData {
         } else {
             light.empty_sky_mask[ls / 64] |= 1 << (ls % 64);
         }
-        // brak źródeł światła blokowego: warstwa istnieje, ale jest pusta
+        // no block light sources: the layer exists but is empty
         light.empty_block_mask[ls / 64] |= 1 << (ls % 64);
     }
     light
 }
 
-/// Buduje ładunek pakietu `level_chunk_with_light` dla chunka (cx, cz).
+/// Builds the `level_chunk_with_light` packet payload for chunk (cx, cz).
 pub fn build_chunk_payload(chunk: &Chunk, cx: i32, cz: i32, ctx: &EncodeCtx<'_>) -> Vec<u8> {
     let mut sections = Vec::with_capacity(8192);
     for s in &chunk.sections {
@@ -321,14 +321,14 @@ pub fn build_chunk_payload(chunk: &Chunk, cx: i32, cz: i32, ctx: &EncodeCtx<'_>)
     }
     let hm = heightmap(chunk, &ctx.dim, ctx.palette);
     let mut hmc = Compound::new();
-    // Klient odczytuje tylko WORLD_SURFACE i MOTION_BLOCKING (`Heightmap.Types.sendToClient`).
+    // The client only reads WORLD_SURFACE and MOTION_BLOCKING (`Heightmap.Types.sendToClient`).
     hmc.put("MOTION_BLOCKING", Tag::LongArray(hm.clone()));
     hmc.put("WORLD_SURFACE", Tag::LongArray(hm));
     let light = skylight(chunk, &ctx.dim, ctx.palette);
     play::level_chunk_with_light(cx, cz, &hmc, &sections, &[], &light)
 }
 
-// -------------------------------------------------------------------- świat
+// -------------------------------------------------------------------- world
 
 pub struct World {
     pub seed: i64,
@@ -340,11 +340,11 @@ pub struct World {
 }
 
 impl World {
-    /// Superflat: bedrock, 2x dirt, grass_block od `min_y` (domyślny preset vanilla), biom plains.
+    /// Superflat: bedrock, 2x dirt, grass_block from `min_y` (the vanilla default preset), plains biome.
     pub fn flat(dim: Dimension, palette: Palette, layers: &[u16], biome: u16, seed: i64) -> Self {
         let mut sections: Vec<Section> = (0..dim.sections()).map(|_| Section { blocks: Blocks::Uniform(palette.air), biome }).collect();
         for (i, &state) in layers.iter().enumerate() {
-            let sy = i; // poniżej 16 warstw — wszystko w sekcji 0
+            let sy = i; // fewer than 16 layers: everything is in section 0
             for z in 0..16 {
                 for x in 0..16 {
                     sections[sy >> 4].set(x, sy & 15, z, state);
@@ -356,15 +356,15 @@ impl World {
     }
 
     /// `BiomeManager.obfuscateSeed`: Guava `Hashing.sha256().hashLong(seed).asLong()`
-    /// (SHA-256 z 8 bajtów little-endian, pierwsze 8 bajtów jako little-endian long).
+    /// (SHA-256 of the 8 little-endian bytes, the first 8 bytes read as a little-endian long).
     pub fn hashed_seed(&self) -> i64 {
         use sha2::{Digest, Sha256};
         let h = Sha256::digest(self.seed.to_le_bytes());
         i64::from_le_bytes(h[..8].try_into().unwrap())
     }
 
-    /// Najwyższy nie-powietrzny blok + 1 w kolumnie (odpowiednik `PlayerRespawnLogic.getOverworldRespawnPos`
-    /// dla świata bez płynów/liści); `None` gdy kolumna jest pusta.
+    /// Highest non-air block + 1 in a column (the equivalent of `PlayerRespawnLogic.getOverworldRespawnPos`
+    /// for a world without fluids/leaves); `None` when the column is empty.
     pub fn surface_y(&self, x: i32, z: i32) -> Option<i32> {
         let ch = self.chunk(x >> 4, z >> 4);
         for sy in (0..self.dim.sections()).rev() {
@@ -388,7 +388,7 @@ impl World {
         self.chunk(x >> 4, z >> 4).get(&self.dim, (x & 15) as usize, y, (z & 15) as usize)
     }
 
-    /// Ustawia blok; zwraca poprzedni stan. Poza światem: brak zmiany.
+    /// Sets a block; returns the previous state. Outside the world: no change.
     pub fn set_block(&mut self, x: i32, y: i32, z: i32, state: u16) -> Option<u16> {
         if y < self.dim.min_y || y >= self.dim.min_y + self.dim.height {
             return None;
@@ -403,7 +403,7 @@ impl World {
         Some(old)
     }
 
-    /// Ramka gotowa do wysłania (z kompresją), z cache'em per chunk.
+    /// A ready-to-send frame (compressed), cached per chunk.
     pub fn chunk_frame(&mut self, cx: i32, cz: i32, enc: &mut FrameEncoder) -> Arc<Vec<u8>> {
         if let Some(c) = self.modified.get(&(cx, cz)) {
             if let Some(f) = &c.cached {
@@ -439,12 +439,12 @@ mod tests {
 
     #[test]
     fn heightmap_bits_for_384() {
-        // Mth.ceillog2(384 + 1) = 9 -> 7 wartości na long -> 37 longów
+        // Mth.ceillog2(384 + 1) = 9 -> 7 values per long -> 37 longs
         let dim = Dimension { min_y: -64, height: 384 };
         let w = World::flat(dim, pal(), &[7, 10, 10, 9], 1, 12345);
         let hm = heightmap(w.chunk(0, 0), &dim, &pal());
         assert_eq!(hm.len(), 37);
-        // wysokość 4 w każdej kolumnie: 7 wartości po 9 bitów w pierwszym longu
+        // height 4 in every column: 7 values of 9 bits in the first long
         let expect: u64 = (0..7).fold(0u64, |a, i| a | (4u64 << (i * 9)));
         assert_eq!(hm[0] as u64, expect);
     }
@@ -458,13 +458,13 @@ mod tests {
         assert_eq!(w.get_block(5, -60, 5), 0);
         assert_eq!(w.spawn, (0, -60, 0));
         let l = skylight(w.chunk(0, 0), &dim, &pal());
-        // zgodnie z pomiarem na serwerze vanilla: sky_mask={1,2}, empty_sky={0}, empty_block={0,1,2}
+        // as measured on the vanilla server: sky_mask={1,2}, empty_sky={0}, empty_block={0,1,2}
         assert_eq!(l.sky_mask[0], 0b110);
         assert_eq!(l.empty_sky_mask[0], 0b001);
         assert_eq!(l.block_mask[0], 0);
         assert_eq!(l.empty_block_mask[0], 0b111);
         assert_eq!(l.sky.len(), 2);
-        // w sekcji 1 pierwsze 4 warstwy (y -64..-61) ciemne, wyższe jasne
+        // in section 1 the first 4 layers (y -64..-61) are dark, the higher ones are lit
         let arr = &l.sky[0];
         assert_eq!(arr[(3 << 8) >> 1] & 0x0F, 0); // y=3 (−61) ciemne
         assert_eq!(arr[(4 << 8) >> 1] & 0x0F, 0x0F); // y=4 (−60) jasne
@@ -477,15 +477,15 @@ mod tests {
         vals[1] = 9;
         let mut w = Vec::new();
         write_container(&mut w, &vals, ContainerKind::States, 15, None);
-        // 3 elementy palety -> 4 bity, paleta liniowa: bity(1) + len(1) + 3 + długość tablicy(2) + 256 longów
+        // 3 palette entries -> 4 bits, linear palette: bits(1) + len(1) + 3 + array length(2) + 256 longs
         assert_eq!(w[0], 4);
         assert_eq!(w[1], 3);
         let mut r = mc_protocol::Reader::new(&w[2..]);
-        assert_eq!((r.varint().unwrap(), r.varint().unwrap(), r.varint().unwrap()), (7, 9, 0)); // kolejność pierwszego wystąpienia
+        assert_eq!((r.varint().unwrap(), r.varint().unwrap(), r.varint().unwrap()), (7, 9, 0)); // order of first appearance
         assert_eq!(r.varint().unwrap(), 256);
     }
 
-    /// Wartość zmierzona na prawdziwym serwerze vanilla 1.21.1 (pakiet Login, pole `hashedSeed`) dla `level-seed=12345`.
+    /// Value measured on the real vanilla 1.21.1 server (Login packet, `hashedSeed` field) for `level-seed=12345`.
     #[test]
     fn hashed_seed_matches_vanilla() {
         let dim = Dimension { min_y: -64, height: 384 };
@@ -505,7 +505,7 @@ mod tests {
         assert_eq!(w.get_block(34, -60, 50), 0);
         let f2 = w.chunk_frame(2, 3, &mut enc);
         assert_ne!(*f1, *f2);
-        // sąsiedni chunk bez zmian
+        // the neighbouring chunk is unchanged
         assert_eq!(w.get_block(0, -60, 0), 0);
     }
 }

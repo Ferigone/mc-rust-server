@@ -24,3 +24,5 @@ mc-protocol.workspace = true
 mc-data.workspace = true
 ureq = { version = "2", default-features = false, features = ["tls"] }
 sha2 = "0.10"
+lz4_flex = "0.11"
+flate2.workspace = true

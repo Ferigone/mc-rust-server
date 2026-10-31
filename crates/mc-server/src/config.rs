@@ -169,6 +169,7 @@ pub struct Settings {
     pub hardcore: bool,
     pub enforce_secure_profile: bool,
     pub enable_status: bool,
+    pub force_game_mode: bool,
     pub hide_online_players: bool,
 }
 
@@ -203,6 +204,7 @@ impl Settings {
             hardcore: p.bool("hardcore", false),
             enforce_secure_profile: p.bool("enforce-secure-profile", true),
             enable_status: p.bool("enable-status", true),
+            force_game_mode: p.bool("force-gamemode", false),
             hide_online_players: p.bool("hide-online-players", false),
         }
     }

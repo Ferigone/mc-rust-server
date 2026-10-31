@@ -47,26 +47,122 @@ impl Compound {
         self.0.is_empty()
     }
 
+    pub fn remove(&mut self, k: &str) -> Option<Tag> {
+        let i = self.0.iter().position(|(kk, _)| kk == k)?;
+        Some(self.0.remove(i).1)
+    }
+
+    // Typed getters with the numeric coercion `CompoundTag` performs (any numeric tag -> number).
+    pub fn get_i64(&self, k: &str) -> Option<i64> {
+        self.get(k).and_then(Tag::as_i64)
+    }
+    pub fn get_i32(&self, k: &str) -> Option<i32> {
+        self.get_i64(k).map(|v| v as i32)
+    }
+    pub fn get_f64(&self, k: &str) -> Option<f64> {
+        self.get(k).and_then(Tag::as_f64)
+    }
+    pub fn get_bool(&self, k: &str) -> Option<bool> {
+        self.get_i64(k).map(|v| v != 0)
+    }
+    pub fn get_str(&self, k: &str) -> Option<&str> {
+        match self.get(k) {
+            Some(Tag::String(s)) => Some(s),
+            _ => None,
+        }
+    }
+    pub fn get_compound(&self, k: &str) -> Option<&Compound> {
+        match self.get(k) {
+            Some(Tag::Compound(c)) => Some(c),
+            _ => None,
+        }
+    }
+    pub fn get_list(&self, k: &str) -> Option<&Vec<Tag>> {
+        match self.get(k) {
+            Some(Tag::List(l)) => Some(l),
+            _ => None,
+        }
+    }
+    pub fn get_long_array(&self, k: &str) -> Option<&Vec<i64>> {
+        match self.get(k) {
+            Some(Tag::LongArray(l)) => Some(l),
+            _ => None,
+        }
+    }
+    pub fn get_byte_array(&self, k: &str) -> Option<&Vec<i8>> {
+        match self.get(k) {
+            Some(Tag::ByteArray(l)) => Some(l),
+            _ => None,
+        }
+    }
+
     /// Key write order like Mojang's `CompoundTag`, which keeps its entries in a `java.util.HashMap`:
     /// bucket index = `(h ^ (h >>> 16)) & (n - 1)`, `h = String.hashCode()`, `n` = power of two >= 16
     /// with size <= 0.75·n; insertion order is kept within a bucket.
     pub fn java_order(&self) -> Vec<usize> {
-        let len = self.0.len();
-        let mut idx: Vec<usize> = (0..len).collect();
-        if len < 2 {
-            return idx;
-        }
-        let mut n = 16usize;
-        while len > n * 3 / 4 {
-            n *= 2;
-        }
-        let bucket = |k: &str| {
-            let h = java_string_hash(k) as u32;
-            ((h ^ (h >> 16)) as usize) & (n - 1)
-        };
-        idx.sort_by_key(|&i| bucket(&self.0[i].0)); // sort_by_key is stable
-        idx
+        let hashes: Vec<i32> = self.0.iter().map(|(k, _)| java_string_hash(k)).collect();
+        java_hashmap_order(&hashes)
     }
+}
+
+/// Iteration order of a `java.util.HashMap` filled by successive `put`s of keys with the given hash codes
+/// (table size: power of two >= 16 with size <= 0.75·n; insertion order is kept within a bucket).
+pub fn java_hashmap_order(hashes: &[i32]) -> Vec<usize> {
+    let len = hashes.len();
+    let mut idx: Vec<usize> = (0..len).collect();
+    if len < 2 {
+        return idx;
+    }
+    let mut n = 16usize;
+    while len > n * 3 / 4 {
+        n *= 2;
+    }
+    let bucket = |h: i32| {
+        let h = h as u32;
+        ((h ^ (h >> 16)) as usize) & (n - 1)
+    };
+    idx.sort_by_key(|&i| bucket(hashes[i])); // sort_by_key is stable
+    idx
+}
+
+/// Iteration order of a fastutil `Object2ObjectOpenHashMap` (default constructor, load factor 0.75) filled by
+/// successive `put`s of keys with the given `hashCode()`s: linear probing on `mix(h) & mask`, table doubling when
+/// full, iteration from the end of the table towards the start.
+pub fn fastutil_open_hash_order(hashes: &[i32]) -> Vec<usize> {
+    fn mix(x: i32) -> u32 {
+        let h = (x as u32).wrapping_mul(0x9E37_79B9);
+        h ^ (h >> 16)
+    }
+    let max_fill = |n: usize| ((n as f64 * 0.75).ceil() as usize).min(n - 1);
+    let mut n = 32usize; // arraySize(16, 0.75)
+    let mut table: Vec<Option<usize>> = vec![None; n];
+    let mut size = 0usize;
+    let place = |table: &mut Vec<Option<usize>>, n: usize, i: usize| {
+        let mut pos = mix(hashes[i]) as usize & (n - 1);
+        while table[pos].is_some() {
+            pos = (pos + 1) & (n - 1);
+        }
+        table[pos] = Some(i);
+    };
+    for i in 0..hashes.len() {
+        place(&mut table, n, i);
+        let was = size;
+        size += 1;
+        if was >= max_fill(n) {
+            // rehash(arraySize(size + 1, 0.75)): re-insert from the end of the old table
+            let mut new_n = ((size + 1) as f64 / 0.75).ceil() as usize;
+            new_n = new_n.next_power_of_two().max(2);
+            let mut new_table: Vec<Option<usize>> = vec![None; new_n];
+            for slot in (0..n).rev() {
+                if let Some(k) = table[slot] {
+                    place(&mut new_table, new_n, k);
+                }
+            }
+            table = new_table;
+            n = new_n;
+        }
+    }
+    (0..n).rev().filter_map(|slot| table[slot]).collect()
 }
 
 /// `java.lang.String.hashCode()` po jednostkach UTF-16.
@@ -105,6 +201,35 @@ impl Tag {
 
     pub fn string(s: impl Into<String>) -> Tag {
         Tag::String(s.into())
+    }
+
+    pub fn as_i64(&self) -> Option<i64> {
+        match self {
+            Tag::Byte(v) => Some(*v as i64),
+            Tag::Short(v) => Some(*v as i64),
+            Tag::Int(v) => Some(*v as i64),
+            Tag::Long(v) => Some(*v),
+            Tag::Float(v) => Some(*v as i64),
+            Tag::Double(v) => Some(*v as i64),
+            _ => None,
+        }
+    }
+    pub fn as_f64(&self) -> Option<f64> {
+        match self {
+            Tag::Byte(v) => Some(*v as f64),
+            Tag::Short(v) => Some(*v as f64),
+            Tag::Int(v) => Some(*v as f64),
+            Tag::Long(v) => Some(*v as f64),
+            Tag::Float(v) => Some(*v as f64),
+            Tag::Double(v) => Some(*v),
+            _ => None,
+        }
+    }
+    pub fn as_compound(&self) -> Option<&Compound> {
+        match self {
+            Tag::Compound(c) => Some(c),
+            _ => None,
+        }
     }
 
     /// Network encoding: type byte + payload (no root name).
@@ -353,8 +478,20 @@ mod tests {
         assert_eq!(order(&["action", "contents"]), ["contents", "action"]);
         assert_eq!(order(&["action", "value"]), ["action", "value"]);
         assert_eq!(order(&["translate", "with"]), ["with", "translate"]); // the vanilla /list bytes start with `with`
-        // heightmapy w pakiecie chunka: MOTION_BLOCKING, WORLD_SURFACE (bajty identyczne z vanilla)
+        // heightmaps in the chunk packet: MOTION_BLOCKING, WORLD_SURFACE (bytes identical to vanilla)
         assert_eq!(order(&["WORLD_SURFACE", "MOTION_BLOCKING"]), ["MOTION_BLOCKING", "WORLD_SURFACE"]);
+    }
+
+    #[test]
+    fn fastutil_order_small_cases() {
+        // a single entry and trivially distinct slots: iteration is by descending slot index
+        assert_eq!(fastutil_open_hash_order(&[]), Vec::<usize>::new());
+        assert_eq!(fastutil_open_hash_order(&[5]), vec![0]);
+        let o = fastutil_open_hash_order(&[1, 2, 3, 4]);
+        assert_eq!(o.len(), 4);
+        let mut sorted = o.clone();
+        sorted.sort();
+        assert_eq!(sorted, vec![0, 1, 2, 3]);
     }
 
     #[test]

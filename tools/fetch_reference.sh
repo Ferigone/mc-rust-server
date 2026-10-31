@@ -30,7 +30,7 @@ fetch server server.jar
 fetch server_mappings server_mappings.txt
 
 if [ ! -d "$REF/gen/generated/reports" ]; then
-  echo "[gen] uruchamiam oficjalny data generator (--all)"
+  echo "[gen] running the official data generator (--all)"
   (cd "$REF/gen" && java -DbundlerMainClass=net.minecraft.data.Main -jar "$REF/dl/server.jar" --all --output "$REF/gen/generated" >/dev/null)
 fi
 echo "OK: $REF/gen/generated/{reports,data,assets}"

@@ -1,9 +1,13 @@
 //! Minecraft Java 1.21.1 (protocol 767) server written in Rust: a port of the vanilla server.
 
+mod anvil;
+mod chunk_io;
 mod auth;
 mod config;
 mod game;
+mod level;
 mod net;
+mod playerdata;
 mod prepare;
 mod world;
 
@@ -32,7 +36,7 @@ fn find_data_dir(arg: Option<PathBuf>) -> Result<PathBuf> {
         }
     }
     anyhow::bail!(
-        "Nie znaleziono danych referencyjnych. Uruchom `tools/fetch_reference.sh` (pobiera serwer od Mojang i uruchamia oficjalny data generator) \
+        "Reference data not found. Run `tools/fetch_reference.sh` (downloads the server from Mojang and runs the official data generator) \
          or point to the directory with --data <dir> / MC_DATA_DIR."
     )
 }
@@ -77,7 +81,7 @@ fn main() -> Result<()> {
         data.registries.len()
     );
 
-    // --- world (superflat; normal generator and Anvil loading: see the roadmap)
+    // --- world: an existing Anvil world in `level-name`, or a new flat world (the normal generator is not ported yet)
     let dim_json = &data.dynamic_registry("minecraft:dimension_type").unwrap().entries.iter().find(|e| e.id == "minecraft:overworld").unwrap().json;
     let dim = world::Dimension { min_y: dim_json["min_y"].as_i64().unwrap() as i32, height: dim_json["height"].as_i64().unwrap() as i32 };
     let st = |n: &str| data.blocks.default_state(n).unwrap_or_else(|| panic!("missing block {n}"));
@@ -87,11 +91,21 @@ fn main() -> Result<()> {
         void_air: st("minecraft:void_air") as u16,
         block_state_count: data.blocks.state_count,
         biome_count: data.dynamic_registry("minecraft:worldgen/biome").unwrap().entries.len() as u32,
+        fluid: std::sync::Arc::new((0..data.blocks.state_count).map(|s| data.blocks.has_fluid(s)).collect()),
     };
-    let plains = data.dynamic_id("minecraft:worldgen/biome", "minecraft:plains").unwrap() as u16;
-    let layers = [st("minecraft:bedrock") as u16, st("minecraft:dirt") as u16, st("minecraft:dirt") as u16, st("minecraft:grass_block") as u16];
-    let seed = config::parse_seed(&settings.level_seed);
-    let world = world::World::flat(dim, palette, &layers, plains, seed);
+    let new_world = world::NewWorld {
+        name: settings.level_name.clone(),
+        seed: config::parse_seed(&settings.level_seed),
+        game_type: settings.game_mode as i32,
+        difficulty: settings.difficulty,
+        hardcore: settings.hardcore,
+    };
+    let mut world = world::World::open(PathBuf::from(&settings.level_name), data.clone(), dim, palette, new_world)?;
+    if let Some(level) = world.level.as_mut() {
+        // DedicatedServer.forceDifficulty: server.properties wins on every start (hardcore forces HARD)
+        let hardcore = level.hardcore();
+        level.data_mut().put("Difficulty", mc_protocol::nbt::Tag::Byte(if hardcore { 3 } else { settings.difficulty as i8 }));
+    }
 
     let ids = game::Ids {
         dimension_type: data.dynamic_id("minecraft:dimension_type", "minecraft:overworld").unwrap(),
@@ -113,7 +127,7 @@ fn main() -> Result<()> {
         ok.then(|| format!("data:image/png;base64,{}", base64(&b)))
     });
     let rsa = if settings.online_mode {
-        info!("Generowanie klucza RSA (online-mode)");
+        info!("Generating the RSA key pair (online-mode)");
         Some(auth::ServerKey::generate()?)
     } else {
         tracing::warn!("**** SERVER IS RUNNING IN OFFLINE/INSECURE MODE!");
@@ -140,12 +154,35 @@ fn main() -> Result<()> {
         info!("Done ({} ms)! For help, type \"help\"", t0.elapsed().as_millis());
         tokio::select! {
             r = net::serve(shared.clone()) => r,
-            _ = tokio::signal::ctrl_c() => { info!("Stopping server"); Ok(()) }
+            _ = stop_signal() => { info!("Stopping server"); Ok(()) }
         }
     });
     let _ = shared.events.send(net::GameEvent::Shutdown);
     let _ = game_thread.join();
     result
+}
+
+/// Resolves on Ctrl+C or, on Unix, SIGTERM (what `docker stop` and service managers send), so the world is saved.
+async fn stop_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = term.recv() => {}
+                }
+            }
+            Err(_) => {
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 fn base64(data: &[u8]) -> String {

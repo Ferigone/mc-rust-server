@@ -33,6 +33,11 @@ pub struct GameData {
 }
 
 impl GameData {
+    /// An empty data set (for unit tests that do not need registries or block tables).
+    pub fn empty() -> Self {
+        Self { root: PathBuf::new(), registries: HashMap::new(), blocks: Blocks::default(), dynamic: Vec::new(), tags: Vec::new() }
+    }
+
     /// `root` = the `generated` directory of the data generator (contains `reports/` and `data/`).
     pub fn load(root: impl AsRef<Path>) -> Result<Self> {
         let root = root.as_ref().to_path_buf();

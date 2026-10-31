@@ -9,6 +9,7 @@ use crate::world::World;
 use mc_data::GameData;
 use mc_protocol::frame::FrameEncoder;
 use mc_protocol::nbt::{Compound, Tag};
+use std::path::PathBuf;
 use mc_protocol::packets::play::{self as pk, Abilities, Border, EntityData, PlayerInfoEntry, Serverbound};
 use mc_protocol::packets::{ClientInformation, GameProfile};
 use mc_protocol::text::Text;
@@ -115,6 +116,13 @@ struct Player {
     inventory: Vec<Option<(i32, i32)>>,
     selected: i8,
     first_tick_done: bool,
+    /// Synchronized attribute instances (movement speed, block range, entity range): created / changed since the last sync.
+    attr_created: [bool; 3],
+    attr_dirty: [bool; 3],
+    /// The creative-mode range modifiers are currently applied (`ServerPlayer.updatePlayerAttributes`).
+    creative_mods: bool,
+    /// Base value of the movement speed attribute (the abilities' walking speed).
+    walk_speed: f64,
     /// Highest sequence to acknowledge at the start of the next tick (`ackBlockChangesUpTo`), -1 = none.
     ack_up_to: i32,
     /// Stan ekwipunku znany klientowi (`remoteSlots`) i licznik `stateId` menu.
@@ -123,6 +131,27 @@ struct Player {
     sneaking: bool,
     sprinting: bool,
     message_index: i32,
+    /// The saved player compound (the base for saving; unknown fields round-trip).
+    data: Compound,
+    health: f32,
+    food: i32,
+    saturation: f32,
+    xp_progress: f32,
+    xp_level: i32,
+    xp_total: i32,
+    /// Stored inventory compounds per menu slot and the (id, count) they were loaded as.
+    inv_raw: Vec<Option<Compound>>,
+    inv_loaded: Vec<Option<(i32, i32)>>,
+}
+
+/// Game rules from `level.dat` that the join sequence and the tick loop depend on.
+#[derive(Clone, Copy)]
+struct Rules {
+    daylight_cycle: bool,
+    reduced_debug_info: bool,
+    immediate_respawn: bool,
+    limited_crafting: bool,
+    spawn_radius: i32,
 }
 
 pub struct Game {
@@ -139,6 +168,8 @@ pub struct Game {
     game_time: i64,
     day_time: i64,
     stopping: bool,
+    rules: Rules,
+    player_dir: PathBuf,
 }
 
 fn pos_enc(v: f64) -> i64 {
@@ -148,7 +179,22 @@ fn pos_enc(v: f64) -> i64 {
 impl Game {
     pub fn new(shared: Arc<Shared>, data: Arc<GameData>, ids: Ids, world: World) -> Self {
         let enc = FrameEncoder::new(if shared.settings.compression_threshold >= 0 { Some(shared.settings.compression_threshold) } else { None });
-        Self { shared, data, ids, world, enc, players: BTreeMap::new(), next_entity_id: 1, tick: 0, dirty: BTreeMap::new(), game_time: 0, day_time: 0, stopping: false }
+        let (game_time, day_time, rules) = match &world.level {
+            Some(l) => (
+                l.game_time(),
+                l.day_time(),
+                Rules {
+                    daylight_cycle: l.rule_bool("doDaylightCycle", true),
+                    reduced_debug_info: l.rule_bool("reducedDebugInfo", false),
+                    immediate_respawn: l.rule_bool("doImmediateRespawn", false),
+                    limited_crafting: l.rule_bool("doLimitedCrafting", false),
+                    spawn_radius: l.rule_int("spawnRadius", 10),
+                },
+            ),
+            None => (0, 0, Rules { daylight_cycle: true, reduced_debug_info: false, immediate_respawn: false, limited_crafting: false, spawn_radius: 10 }),
+        };
+        let player_dir = PathBuf::from(&shared.settings.level_name).join("playerdata");
+        Self { shared, data, ids, world, enc, players: BTreeMap::new(), next_entity_id: 1, tick: 0, dirty: BTreeMap::new(), game_time, day_time, stopping: false, rules, player_dir }
     }
 
     pub fn run(mut self, rx: Receiver<GameEvent>) {
@@ -180,6 +226,8 @@ impl Game {
         for s in sessions {
             self.kick(s, Text::translatable("multiplayer.disconnect.server_shutdown"));
         }
+        let saved = self.world.save(self.game_time, self.day_time);
+        info!("World saved ({saved} chunks)");
     }
 
     // ------------------------------------------------------------ sending
@@ -215,7 +263,14 @@ impl Game {
     fn handle_event(&mut self, ev: GameEvent) {
         match ev {
             GameEvent::Join(req) => self.on_join(*req),
-            GameEvent::Packet { session, packet } => self.on_packet(session, packet),
+            GameEvent::Packets { session, packets } => {
+                for packet in packets {
+                    if !self.players.contains_key(&session) {
+                        break; // kicked while handling an earlier packet of the same read
+                    }
+                    self.on_packet(session, packet);
+                }
+            }
             GameEvent::Disconnected { session, reason } => {
                 if self.players.contains_key(&session) {
                     let name = self.players[&session].name.clone();
@@ -275,13 +330,32 @@ impl Game {
 
         let entity_id = self.next_entity_id;
         self.next_entity_id += 1;
-        let gm = self.shared.settings.game_mode;
-        let (px, py, pz) = self.adjust_spawn_location();
-        let (x, y, z) = (px as f64 + 0.5, py as f64, pz as f64 + 0.5);
+        let default_gm = self.default_game_mode();
+        let saved = crate::playerdata::load(&self.player_dir, uuid);
+        let returning = saved.is_some();
+        let force_gm = self.shared.settings.force_game_mode;
+        let (x, y, z, yaw, pitch, gm, data) = match saved {
+            Some(d) => {
+                let pos: Vec<f64> = d.get_list("Pos").map(|l| l.iter().filter_map(Tag::as_f64).collect()).unwrap_or_default();
+                let rot: Vec<f64> = d.get_list("Rotation").map(|l| l.iter().filter_map(Tag::as_f64).collect()).unwrap_or_default();
+                let gm = if force_gm { default_gm } else { d.get_i32("playerGameType").unwrap_or(default_gm as i32) as u8 };
+                if pos.len() == 3 {
+                    (pos[0], pos[1], pos[2], rot.first().copied().unwrap_or(0.0) as f32, rot.get(1).copied().unwrap_or(0.0) as f32, gm, d)
+                } else {
+                    let (px, py, pz) = self.adjust_spawn_location();
+                    (px as f64 + 0.5, py as f64, pz as f64 + 0.5, 0.0, 0.0, gm, d)
+                }
+            }
+            None => {
+                let (px, py, pz) = self.adjust_spawn_location();
+                let (x, y, z) = (px as f64 + 0.5, py as f64, pz as f64 + 0.5);
+                (x, y, z, 0.0, 0.0, default_gm, crate::playerdata::new_player(uuid, (x, y, z), (0.0, 0.0), default_gm as i32))
+            }
+        };
 
         info!("{name}[{addr}] logged in with entity id {entity_id} at ({x:.1}, {y:.1}, {z:.1})");
-        let mut inventory = vec![None; 46];
-        inventory[0] = None;
+        let (inventory, inv_raw) = self.load_inventory(&data);
+        let selected = data.get_i32("SelectedItemSlot").unwrap_or(0).clamp(0, 8) as i8;
         let p = Player {
             session,
             entity_id,
@@ -294,9 +368,9 @@ impl Game {
             x,
             y,
             z,
-            yaw: 0.0,
-            pitch: 0.0,
-            on_ground: false,
+            yaw,
+            pitch,
+            on_ground: data.get_bool("OnGround").unwrap_or(false),
             teleport_counter: 0,
             awaiting: None,
             ka_pending: false,
@@ -313,51 +387,68 @@ impl Game {
             was_on_ground: false,
             teleport_delay: 0,
             ticks: 0,
+            inv_loaded: inventory.clone(),
             inventory,
-            selected: 0,
+            selected,
             first_tick_done: false,
+            // A new player has no attribute instances yet (the first tick creates them and syncs the dirty ones); a player
+            // loaded from disk already has the movement speed set by the abilities.
+            attr_created: [returning, false, false],
+            attr_dirty: [!returning, false, false],
+            creative_mods: false,
+            walk_speed: abilities_from(&data, gm).walking_speed as f64,
             ack_up_to: -1,
             remote_inv: vec![None; 46],
             state_id: 1,
             sneaking: false,
             sprinting: false,
             message_index: 0,
+            health: data.get_f64("Health").unwrap_or(20.0) as f32,
+            food: data.get_i32("foodLevel").unwrap_or(20),
+            // FoodData.readAdditionalSaveData: when foodLevel is stored the other fields default to 0, otherwise 20 / 5.0
+            saturation: if data.get_i32("foodLevel").is_some() { data.get_f64("foodSaturationLevel").unwrap_or(0.0) as f32 } else { 5.0 },
+            xp_progress: data.get_f64("XpP").unwrap_or(0.0) as f32,
+            xp_level: data.get_i32("XpLevel").unwrap_or(0),
+            xp_total: data.get_i32("XpTotal").unwrap_or(0),
+            inv_raw,
+            data,
         };
         self.players.insert(session, p);
 
         let s = &self.shared.settings;
+        let (hardcore, is_flat) = (self.world.level.as_ref().map(|l| l.hardcore()).unwrap_or(s.hardcore), self.world.is_flat());
         // 1. Login
         // The set of dimension keys like in vanilla (`server.levelKeys()`), in the order observed on the real server.
         let dims = [self.ids.overworld, "minecraft:the_end", "minecraft:the_nether"];
         let login = pk::login(&pk::LoginInfo {
             entity_id,
-            hardcore: s.hardcore,
+            hardcore,
             dimensions: &dims,
             max_players: s.max_players,
             view_distance: s.view_distance,
             simulation_distance: s.simulation_distance,
-            reduced_debug_info: false,
-            show_death_screen: true,
-            do_limited_crafting: false,
+            reduced_debug_info: self.rules.reduced_debug_info,
+            show_death_screen: !self.rules.immediate_respawn,
+            do_limited_crafting: self.rules.limited_crafting,
             dimension_type: self.ids.dimension_type,
             dimension: self.ids.overworld,
             hashed_seed: self.world.hashed_seed(),
             game_mode: gm,
             previous_game_mode: -1,
             is_debug: false,
-            is_flat: true,
+            is_flat,
             last_death: None,
             portal_cooldown: 0,
             enforces_secure_chat: crate::net::ENFORCES_SECURE_CHAT,
         });
-        let difficulty = s.difficulty;
+        let (difficulty, locked) = self.world.level.as_ref().map(|l| (l.difficulty(), l.difficulty_locked())).unwrap_or((s.difficulty, false));
         let motd = Text::plain(s.motd.clone());
         self.send(session, &login);
         // 2-5. Difficulty, abilities, selected slot, recipes
-        self.send(session, &pk::change_difficulty(difficulty, false));
-        let ab = abilities_for(gm);
+        self.send(session, &pk::change_difficulty(difficulty, locked));
+        let ab = abilities_from(&self.players[&session].data, gm);
         self.send(session, &pk::player_abilities(&ab));
-        self.send(session, &pk::set_carried_item(0));
+        self.send(session, &pk::set_carried_item(selected));
         self.send(session, &pk::update_recipes_empty());
         // 6. Permission level (entity event 24 + level)
         self.send(session, &pk::entity_event(entity_id, 24));
@@ -367,7 +458,7 @@ impl Game {
         let f = pk::system_chat(&join_msg, false);
         self.broadcast(&f, Some(session));
         // 9. Teleport (start position)
-        self.teleport(session, x, y, z, 0.0, 0.0);
+        self.teleport(session, x, y, z, yaw, pitch);
         // 10. Server data
         self.send(session, &pk::server_data(&motd, None));
         // 11. Player list: existing -> new
@@ -380,10 +471,19 @@ impl Game {
         let payload = pk::player_info_update(pk::player_info_action::INITIALIZING, &[Self::info_entry(&self.players[&session])]);
         self.broadcast(&payload, None);
         // 13. sendLevelInfo
-        self.send(session, &pk::initialize_border(&Border::default()));
-        self.send(session, &pk::set_time(self.game_time, self.day_time, true));
+        let border = self.border();
+        self.send(session, &pk::initialize_border(&border));
+        self.send(session, &pk::set_time(self.game_time, self.day_time, self.rules.daylight_cycle));
         let (sx, sy, sz) = self.world.spawn;
-        self.send(session, &pk::set_default_spawn_position(sx, sy, sz, 0.0));
+        let angle = self.world.level.as_ref().map(|l| l.spawn_angle()).unwrap_or(0.0);
+        self.send(session, &pk::set_default_spawn_position(sx, sy, sz, angle));
+        let weather = self.world.level.as_ref().map(|l| (l.raining(), l.thundering()));
+        if let Some((true, thundering)) = weather {
+            // the rain level of a freshly loaded level is 1.0 (thunder 1.0 only when thundering)
+            self.send(session, &pk::game_event(pk::game_event::START_RAINING, 0.0));
+            self.send(session, &pk::game_event(pk::game_event::RAIN_LEVEL_CHANGE, 1.0));
+            self.send(session, &pk::game_event(pk::game_event::THUNDER_LEVEL_CHANGE, if thundering { 1.0 } else { 0.0 }));
+        }
         self.send(session, &pk::game_event(pk::game_event::LEVEL_CHUNKS_LOAD_START, 0.0));
         // tickRateManager().updateJoiningPlayer: tick rate and step
         self.send(session, &pk::ticking_state(20.0, false));
@@ -392,14 +492,99 @@ impl Game {
         self.update_chunk_tracking(session);
         self.update_entity_tracking(session);
         // 15. initInventoryMenu
-        self.send(session, &pk::container_set_content_empty(0, 1, 46));
+        let items = self.players[&session].inventory.clone();
+        self.players.get_mut(&session).unwrap().remote_inv = items.clone();
+        self.send(session, &pk::container_set_content(0, 1, &items, None));
         // the player's own entity data (sendPairingData for the player itself)
         let data = Self::entity_data_values(&self.players[&session]);
         self.send(session, &pk::set_entity_data(entity_id, &data));
+        // the attribute instances that already exist (a player loaded from disk has the movement speed)
+        let existing: Vec<usize> = (0..3).filter(|&k| self.players[&session].attr_created[k]).collect();
+        if let Some(payload) = self.attributes_packet(&self.players[&session], &existing) {
+            self.send(session, &payload);
+        }
         self.sync_status();
     }
 
+    fn default_game_mode(&self) -> u8 {
+        self.world.level.as_ref().map(|l| l.game_type() as u8).unwrap_or(self.shared.settings.game_mode)
+    }
+
+    /// The world border from `level.dat` (`WorldBorder` serialization), defaulting to the maximum size.
+    fn border(&self) -> Border {
+        let mut b = Border::default();
+        if let Some(l) = &self.world.level {
+            let d = l.data();
+            b.center_x = d.get_f64("BorderCenterX").unwrap_or(0.0);
+            b.center_z = d.get_f64("BorderCenterZ").unwrap_or(0.0);
+            let size = d.get_f64("BorderSize").unwrap_or(b.old_size);
+            b.old_size = size;
+            b.new_size = d.get_f64("BorderSizeLerpTarget").unwrap_or(size);
+            b.lerp_time = d.get_i64("BorderSizeLerpTime").unwrap_or(0);
+            b.warning_blocks = d.get_f64("BorderWarningBlocks").unwrap_or(5.0) as i32;
+            b.warning_time = d.get_f64("BorderWarningTime").unwrap_or(15.0) as i32;
+        }
+        b
+    }
+
+    /// Parses the stored `Inventory` list into menu slots: (id, count) for the client and the raw compounds for saving.
+    #[allow(clippy::type_complexity)]
+    fn load_inventory(&self, data: &Compound) -> (Vec<Option<(i32, i32)>>, Vec<Option<Compound>>) {
+        let mut items = vec![None; 46];
+        let mut raw: Vec<Option<Compound>> = vec![None; 46];
+        let ids = self.data.registries.get("minecraft:item");
+        for it in data.get_list("Inventory").map(|l| l.as_slice()).unwrap_or(&[]) {
+            let Some(c) = it.as_compound() else { continue };
+            let Some(slot) = c.get_i32("Slot").and_then(crate::playerdata::menu_slot) else { continue };
+            let count = c.get_i32("count").or_else(|| c.get_i32("Count")).unwrap_or(1);
+            if let Some(id) = c.get_str("id").and_then(|n| ids.and_then(|r| r.ids.get(n))) {
+                items[slot] = Some((*id, count));
+                raw[slot] = Some(c.clone());
+            }
+        }
+        (items, raw)
+    }
+
+    /// Writes the player's saved state (position, rotation, mode, vitals, inventory) to `playerdata/<uuid>.dat`.
+    fn save_player(&mut self, session: u64) {
+        let Some(p) = self.players.get(&session) else { return };
+        let mut d = p.data.clone();
+        d.put("DataVersion", Tag::Int(crate::playerdata::DATA_VERSION));
+        d.put("Pos", Tag::List(vec![Tag::Double(p.x), Tag::Double(p.y), Tag::Double(p.z)]));
+        d.put("Rotation", Tag::List(vec![Tag::Float(p.yaw), Tag::Float(p.pitch)]));
+        d.put("Dimension", Tag::string(self.ids.overworld));
+        d.put("playerGameType", Tag::Int(p.game_mode as i32));
+        d.put("SelectedItemSlot", Tag::Int(p.selected as i32));
+        d.put("OnGround", Tag::Byte(p.on_ground as i8));
+        d.put("Health", Tag::Float(p.health));
+        d.put("foodLevel", Tag::Int(p.food));
+        d.put("foodSaturationLevel", Tag::Float(p.saturation));
+        d.put("XpP", Tag::Float(p.xp_progress));
+        d.put("XpLevel", Tag::Int(p.xp_level));
+        d.put("XpTotal", Tag::Int(p.xp_total));
+        // inventory: unchanged stacks keep their stored compound (components!), changed ones are rewritten
+        let names = self.data.registries.get("minecraft:item").map(|r| &r.names);
+        let mut inv: Vec<Tag> = Vec::new();
+        for (menu, item) in p.inventory.iter().enumerate() {
+            let Some(stored) = crate::playerdata::stored_slot(menu) else { continue };
+            match item {
+                Some(cur) if p.inv_loaded[menu] == Some(*cur) && p.inv_raw[menu].is_some() => inv.push(Tag::Compound(p.inv_raw[menu].clone().unwrap())),
+                Some((id, count)) => {
+                    if let Some(n) = names.and_then(|n| n.get(*id as usize)) {
+                        inv.push(Tag::Compound(Compound::new().with("Slot", Tag::Byte(stored)).with("id", Tag::string(n.clone())).with("count", Tag::Int(*count))));
+                    }
+                }
+                None => {}
+            }
+        }
+        d.put("Inventory", Tag::List(inv));
+        if let Err(e) = crate::playerdata::save(&self.player_dir, p.uuid, &d) {
+            warn!("Could not save player data of {}: {e}", p.name);
+        }
+    }
+
     fn remove_player(&mut self, session: u64) {
+        self.save_player(session);
         let Some(p) = self.players.remove(&session) else { return };
         let uuid = p.uuid;
         let eid = p.entity_id;
@@ -436,7 +621,7 @@ impl Game {
         self.send(session, &payload);
     }
 
-    // ------------------------------------------------------------ chunki
+    // ------------------------------------------------------------ chunks
 
     fn desired_view(&self, p: &Player) -> View {
         let dist = (p.info.view_distance as i32).clamp(2, self.shared.settings.view_distance);
@@ -570,7 +755,7 @@ impl Game {
         if flags != 0 {
             data.push((0, EntityData::Byte(flags)));
         }
-        data.push((9, EntityData::Float(20.0)));
+        data.push((9, EntityData::Float(p.health)));
         if p.info.model_customisation != 0 {
             data.push((17, EntityData::Byte(p.info.model_customisation as i8)));
         }
@@ -580,30 +765,76 @@ impl Game {
         data
     }
 
-    /// Attributes synchronized with the client for a fresh player (order like vanilla).
-    fn player_attributes(&self) -> [(i32, f64); 3] {
-        [(self.ids.attr_movement_speed, 0.1f32 as f64), (self.ids.attr_entity_range, 3.0), (self.ids.attr_block_range, 4.5)]
+    /// `ClientboundUpdateAttributesPacket` for the given attribute instances of a player
+    /// (0 = movement speed, 1 = block interaction range, 2 = entity interaction range), or `None` for an empty selection.
+    fn attributes_packet(&self, p: &Player, which: &[usize]) -> Option<Vec<u8>> {
+        const BLOCK_MOD: [(&str, f64); 1] = [("minecraft:creative_mode_block_range", 0.5)];
+        const ENTITY_MOD: [(&str, f64); 1] = [("minecraft:creative_mode_entity_range", 2.0)];
+        if which.is_empty() {
+            return None;
+        }
+        let list: Vec<pk::AttributeSnapshot<'_>> = which
+            .iter()
+            .map(|&i| match i {
+                0 => pk::AttributeSnapshot { id: self.ids.attr_movement_speed, base: p.walk_speed, modifiers: &[] },
+                1 => pk::AttributeSnapshot { id: self.ids.attr_block_range, base: 4.5, modifiers: if p.creative_mods { &BLOCK_MOD } else { &[] } },
+                _ => pk::AttributeSnapshot { id: self.ids.attr_entity_range, base: 3.0, modifiers: if p.creative_mods { &ENTITY_MOD } else { &[] } },
+            })
+            .collect();
+        Some(pk::update_attributes(p.entity_id, &list))
+    }
+
+    /// `ServerPlayer.updatePlayerAttributes` (every tick): creates the range instances and applies / removes the creative
+    /// modifiers; then `LivingEntity.updateDirtyAttributes` syncs what changed to the player and everybody tracking it.
+    fn update_player_attributes(&mut self, session: u64) {
+        let (payload, observers) = {
+            let p = self.players.get_mut(&session).unwrap();
+            p.attr_created[1] = true;
+            p.attr_created[2] = true;
+            let creative = p.game_mode == 1;
+            if creative != p.creative_mods {
+                p.creative_mods = creative;
+                p.attr_dirty[1] = true;
+                p.attr_dirty[2] = true;
+            }
+            // dirty order as observed on the vanilla server: block range, movement speed, entity range
+            let which: Vec<usize> = [1usize, 0, 2].into_iter().filter(|&i| p.attr_dirty[i]).collect();
+            p.attr_dirty = [false; 3];
+            let payload = self.attributes_packet(&self.players[&session], &which);
+            let observers: Vec<u64> = self.players.iter().filter(|(s, o)| **s != session && o.tracked.contains(&session)).map(|(s, _)| *s).collect();
+            (payload, observers)
+        };
+        if let Some(payload) = payload {
+            let f = self.frame(&payload);
+            for s in std::iter::once(&session).chain(observers.iter()) {
+                if let Some(p) = self.players.get(s) {
+                    p.sender.send(f.clone());
+                }
+            }
+        }
     }
 
     /// Packets for a player appearing at an observer: one bundle (`ClientboundBundlePacket`)
     /// with add_entity, entity data and attributes, like `ServerEntity.sendPairingData`.
     fn spawn_packets(&self, p: &Player) -> Vec<Vec<u8>> {
-        vec![
+        let mut out = vec![
             pk::bundle_delimiter(),
             pk::add_entity(p.entity_id, p.uuid, self.ids.player_entity_type, p.x, p.y, p.z, p.pitch, p.yaw, p.yaw, 0, 0, 0, 0),
             pk::set_entity_data(p.entity_id, &Self::entity_data_values(p)),
-            pk::update_attributes(p.entity_id, &self.player_attributes()),
-            pk::bundle_delimiter(),
-        ]
+        ];
+        // only the attribute instances that exist at this moment are synchronized
+        let existing: Vec<usize> = (0..3).filter(|&k| p.attr_created[k]).collect();
+        out.extend(self.attributes_packet(p, &existing));
+        out.push(pk::bundle_delimiter());
+        out
     }
 
     /// `ServerPlayer.adjustSpawnLocation`: a random point in a square of radius `spawnRadius` around the world spawn
     /// (iterated with a coprime step), the first one with valid ground.
-    fn adjust_spawn_location(&self) -> (i32, i32, i32) {
+    fn adjust_spawn_location(&mut self) -> (i32, i32, i32) {
         use rand::Rng;
-        const SPAWN_RADIUS: i32 = 10; // gamerule spawnRadius
         let (sx, sy, sz) = self.world.spawn;
-        let r = SPAWN_RADIUS.max(0) as i64;
+        let r = self.rules.spawn_radius.max(0) as i64;
         let side = r * 2 + 1;
         let n = side * side;
         let coprime = if n <= 16 { n - 1 } else { 17 };
@@ -742,10 +973,35 @@ impl Game {
     fn do_tick(&mut self) {
         self.tick += 1;
         self.game_time += 1;
-        self.day_time += 1;
+        if self.rules.daylight_cycle {
+            self.day_time += 1;
+        }
         if self.tick % 20 == 0 {
-            let f = pk::set_time(self.game_time, self.day_time, true);
+            let f = pk::set_time(self.game_time, self.day_time, self.rules.daylight_cycle);
             self.broadcast(&f, None);
+        }
+        // autosave every 5 minutes (vanilla: every 6000 ticks) and unload chunks nobody watches
+        if self.tick % 6000 == 0 {
+            let saved = self.world.save(self.game_time, self.day_time);
+            let uuids: Vec<u64> = self.players.keys().copied().collect();
+            for s in uuids {
+                self.save_player(s);
+            }
+            info!("Saved the world ({saved} chunks)");
+        }
+        if self.tick % 200 == 0 {
+            let mut keep = std::collections::HashSet::new();
+            for p in self.players.values() {
+                if let Some(v) = p.view {
+                    let (a, b, c, d) = v.bounds();
+                    for x in a - 1..=c + 1 {
+                        for z in b - 1..=d + 1 {
+                            keep.insert((x, z));
+                        }
+                    }
+                }
+            }
+            self.world.evict(&keep, self.game_time);
         }
         // ChunkMap.tick -> ChunkHolder.broadcastChanges: block changes go to the players tracking the chunk
         self.flush_block_changes();
@@ -823,7 +1079,7 @@ impl Game {
         let eye = (p.x, p.y + if p.sneaking { 1.27 } else { 1.62 }, p.z);
         let d = |v: f64, lo: i32| (lo as f64 - v).max(v - (lo as f64 + 1.0)).max(0.0);
         let (dx, dy, dz) = (d(eye.0, x), d(eye.1, y), d(eye.2, z));
-        let r = 4.5 + extra; // block_interaction_range
+        let r = if p.creative_mods { 5.0 } else { 4.5 } + extra; // block_interaction_range (+0.5 creative modifier)
         dx * dx + dy * dy + dz * dz < r * r
     }
 
@@ -886,17 +1142,17 @@ impl Game {
         let first = !self.players[&s].first_tick_done;
         if first {
             self.players.get_mut(&s).unwrap().first_tick_done = true;
-            self.send(s, &pk::set_health(20.0, 20, 5.0));
-            self.send(s, &pk::set_experience(0.0, 0, 0));
+            let (h, f, sat, xp) = {
+                let p = &self.players[&s];
+                (p.health, p.food, p.saturation, (p.xp_progress, p.xp_level, p.xp_total))
+            };
+            self.send(s, &pk::set_health(h, f, sat));
+            self.send(s, &pk::set_experience(xp.0, xp.1, xp.2));
         }
         self.broadcast_inventory_changes(s);
         self.send_next_chunks(s);
-        if first {
-            // vanilla sends the player's attributes only after the first chunk batch (LivingEntity.updateDirtyAttributes)
-            let eid = self.players[&s].entity_id;
-            let attrs = self.player_attributes();
-            self.send(s, &pk::update_attributes(eid, &attrs));
-        }
+        // vanilla syncs the player's attributes after the chunk batch (ServerPlayer.tick -> LivingEntity.updateDirtyAttributes)
+        self.update_player_attributes(s);
         self.send_entity_changes(s);
     }
 
@@ -1168,7 +1424,7 @@ impl Game {
                 self.handle_block_break_action(session, action, x, y, z);
                 self.ack_block_changes_up_to(session, sequence);
             }
-            _ => {} // drop / release / swap: ekwipunek i przedmioty (M8)
+            _ => {} // drop / release / swap: inventory and items (M8)
         }
     }
 
@@ -1243,7 +1499,8 @@ impl Game {
             if !awaiting && self.may_interact(x, z) && gm != 3 && gm != 2 {
                 let slot = if hand == 0 { 36 + self.players[&session].selected as usize } else { 45 };
                 let held = self.players[&session].inventory.get(slot).copied().flatten();
-                let target_air = self.world.palette.is_air(self.world.get_block(px, py, pz));
+                let target_block = self.world.get_block(px, py, pz);
+                let target_air = self.world.palette.is_air(target_block);
                 if let (Some((item_id, _)), true) = (held, target_air && py < max_h && py >= self.world.dim.min_y) {
                     // item -> block with the same name; default state (getStateForPlacement: M7)
                     let name = self.data.registries.get("minecraft:item").and_then(|r| r.names.get(item_id as usize)).cloned();
@@ -1265,6 +1522,21 @@ impl Game {
         // vanilla always sends back the state of the clicked and the adjacent block so the client reverts its prediction
         self.resend_block(session, x, y, z);
         self.resend_block(session, px, py, pz);
+    }
+}
+
+fn abilities_from(data: &Compound, gm: u8) -> Abilities {
+    let base = abilities_for(gm);
+    match data.get_compound("abilities") {
+        Some(a) => Abilities {
+            invulnerable: a.get_bool("invulnerable").unwrap_or(base.invulnerable),
+            flying: a.get_bool("flying").unwrap_or(base.flying),
+            may_fly: a.get_bool("mayfly").unwrap_or(base.may_fly),
+            instabuild: a.get_bool("instabuild").unwrap_or(base.instabuild),
+            flying_speed: a.get_f64("flySpeed").unwrap_or(base.flying_speed as f64) as f32,
+            walking_speed: a.get_f64("walkSpeed").unwrap_or(base.walking_speed as f64) as f32,
+        },
+        None => base,
     }
 }
 

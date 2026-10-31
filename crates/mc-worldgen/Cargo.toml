@@ -1,0 +1,7 @@
+[package]
+name = "mc-worldgen"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+md-5.workspace = true

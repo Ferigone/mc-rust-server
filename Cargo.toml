@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/mc-protocol", "crates/mc-data", "crates/mc-server", "crates/mc-probe"]
+members = ["crates/mc-protocol", "crates/mc-data", "crates/mc-worldgen", "crates/mc-server", "crates/mc-probe"]
 
 [workspace.package]
 edition = "2024"
@@ -26,6 +26,7 @@ rand = "0.8"
 rsa = "0.9"
 mc-protocol = { path = "crates/mc-protocol" }
 mc-data = { path = "crates/mc-data" }
+mc-worldgen = { path = "crates/mc-worldgen" }
 
 [profile.release]
 opt-level = 3

@@ -3,7 +3,7 @@
 A port of the **Minecraft: Java Edition 1.21 / 1.21.1** server (protocol **767**) to Rust. The goal is 1:1 behaviour
 with the vanilla server, so that an unmodified Java 1.21 client can connect and play.
 
-> **Status: milestone 5 of about 12 is under way (world generation: the terrain shape is done, biomes / surface / features are not) (see [docs/ROADMAP.md](docs/ROADMAP.md)).** This is a foundation, not a complete port.
+> **Status: milestone 5 of about 12 is under way (world generation: the terrain shape and the biome source are done, surface / carvers / features / structures are not) (see [docs/ROADMAP.md](docs/ROADMAP.md)).** This is a foundation, not a complete port.
 > Vanilla is ~4,000 classes and ~470,000 lines of code; this document states exactly what works and has been verified,
 > and what is still missing. It has not been tested with a real Minecraft client (none is available in the build
 > environment); it has been tested against Mojang's own decoders and in a differential test against the real vanilla
@@ -21,7 +21,8 @@ with the vanilla server, so that an unmodified Java 1.21 client can connect and 
 | Keep-alive, chat (unsigned), `/list`, visibility and movement of other players (`ServerEntity.sendChanges`) | ✅ |
 | Block breaking/placing (simplified), 20 TPS | ⚠️ simplified |
 | **Light engine** (block + sky light, section storage rules, face-shape occlusion) and real heightmaps for generated / edited chunks | ✅ identical to the vanilla server on every stored layer of a vanilla-generated world (see below); incremental `light_update` packets after edits: not yet |
-| **Terrain shape** (`crates/mc-worldgen`): random sources, all noise functions, the data-driven density function graph with splines, the wired `NoiseRouter`, `NoiseChunk` (cell interpolation, caches), the aquifer (water / lava lakes) and ore veins, for every vanilla noise setting (overworld, amplified, large biomes, nether, end, caves, floating islands) | ✅ bit-identical to the Mojang classes: 878 random / noise values, 5,760 router values, 34 generated chunks; **not wired into the server yet** (no biomes, surface blocks, carvers, features or structures, so it would look like bare stone) |
+| **Terrain shape** (`crates/mc-worldgen`): random sources, all noise functions, the data-driven density function graph with splines, the wired `NoiseRouter`, `NoiseChunk` (cell interpolation, caches), the aquifer (water / lava lakes) and ore veins, for every vanilla noise setting (overworld, amplified, large biomes, nether, end, caves, floating islands) | ✅ bit-identical to the Mojang classes: 878 random / noise values, 5,760 router values, 34 generated chunks; **not wired into the server yet** (no surface blocks, carvers, features or structures, so it would look like bare stone) |
+| **Biome source** (`crates/mc-worldgen`): `Climate` (quantized parameters, the parameter-space R-tree with its thread-local shortcut, the sampler, the world spawn search), the overworld parameter table (`OverworldBiomeBuilder`, 7,593 entries), the nether preset and the End island biomes | ✅ identical to the Mojang classes: all list entries, 160,000 R-tree searches including exact ties, 79,300 biomes sampled from 13 seeds / settings, 9 spawn searches; not wired into the server yet |
 | Block placement uses the real item→block mapping, replaceable blocks, and the real collision shapes against player hitboxes | ✅ (default block state only until `getStateForPlacement`, M7) |
 | **Worlds on disk**: Anvil regions (`.mca`, zlib/gzip/LZ4/uncompressed, external `.mcc`), `level.dat`, `playerdata/*.dat` (position, game mode, health, food, XP, inventory), stored heightmaps/light/block entities, `level-name`/`level-seed`, autosave, graceful save on Ctrl+C/SIGTERM | ✅ loads worlds of the vanilla server and writes worlds the vanilla server loads (see below) |
 | `server.properties` (same keys and defaults as vanilla) | ✅ read/write |
@@ -73,7 +74,7 @@ Mojang's servers onto the user's machine. Running the original server requires a
 | `tools/vanilla_compare.sh` | Differential test against the real vanilla server (requires `MC_EULA_ACCEPTED=true`). |
 | `tools/world_compare.sh`, `tools/world_compare.py` | World persistence test: vanilla generates a world, both servers load it and their chunk packets are compared; then the Rust server edits and saves the world and vanilla loads it (requires `MC_EULA_ACCEPTED=true`). |
 | `tools/remap.sh` | Produces `server-named.jar`, the vanilla server with Mojang's official names (shared by the tools below). |
-| `tools/verify_terrain.sh` | Runs the real `NoiseChunk` fill loop (`tools/terrain/.../TerrainRef.java`) and the real noise router (`RouterRef.java`) for 9 configurations and compares the Rust port block by block / value by value. |
+| `tools/verify_terrain.sh` | Runs the real `NoiseChunk` fill loop (`tools/terrain/.../TerrainRef.java`), the real noise router (`RouterRef.java`) and the real biome sources (`BiomeRef.java`) for 9 / 13 configurations and compares the Rust port block by block / value by value. |
 | `tools/verify_noise.sh` | Runs the real random sources and noise functions (`tools/noise/NoiseRef.java`) and compares them bit for bit with `crates/mc-worldgen`. |
 | `tools/light_check.sh` | Recomputes the light of every chunk of a vanilla-generated world and compares it with the light vanilla stored (also `mc-server --check-light`). |
 | `tools/dump_props.sh` | Runs the **real** block and item classes and dumps per-state facts (hardness, blast resistance, light emission / opacity, collision / outline / occlusion shapes, 18 flags such as `isAir`, "holds a fluid", replaceable) and per-item facts (stack size, durability, placed block) into `reference/gen/generated/reports/{block_props,item_props}.tsv`. Run by `tools/fetch_reference.sh`. |
@@ -145,6 +146,29 @@ player attributes and the world border constant.
 Run against an older world (generated, then left running for a while), the remaining differences are all changes the vanilla
 server makes by itself after loading: scheduled block/fluid ticks (leaf decay distance, flowing water and lava) and light
 that spills in from chunks that only vanilla generates. Those belong to milestones M4/M5/M7.
+
+## Biome source test (milestone 5, part 3)
+
+`tools/verify_terrain.sh` also runs `tools/terrain/.../BiomeRef.java` with the **real** `Climate`, `MultiNoiseBiomeSource`,
+`MultiNoiseBiomeSourceParameterList` and `TheEndBiomeSource`, and `crates/mc-worldgen/tests/biome_parity.rs` compares the Rust port
+(**246,907 values, all identical**):
+
+* the complete overworld (7,593 entries) and nether parameter lists, entry by entry, including the order that decides ties,
+* 160,000 R-tree searches. The biome tables almost never produce a tie between different biomes, so besides the real lists the test
+  searches 100,000 targets in randomly generated lists on a coarse grid (distinct values, clustered like vanilla's depth 0 / 1 pairs):
+  about 19,700 of them end on an exact tie where the tree and a brute-force search disagree, and the Rust tree gives the vanilla answer every time,
+* the climate target (six quantized values) and the biome at 79,300 quart positions for 13 seeds / settings (overworld, amplified,
+  large biomes, caves, floating islands, nether, End): 63 different biomes are hit,
+* `findSpawnPosition` for the 9 overworld-type settings.
+
+The mutation checks show the test is sensitive: ignoring the thread-local "last result", taking the last instead of the first cheapest
+split dimension, changing the sort of the buckets / of the small nodes, dropping the last sort tie-break, rounding instead of truncating
+the quantization, or changing a single entry of the biome tables all fail it. Two mutations cannot fail it: `best >= leaf_d` in the
+search (equivalent, a recursive search only returns a different leaf when it is strictly nearer) and `best >= d` (only prunes less).
+
+Vanilla details reproduced: `quantizeCoord` truncates the *float* product (`-0.78F * 10000F` is `-7799.9995`, so the boundary is
+`-7799`); the R-tree keeps the previous result of the thread on exact ties (so the answer depends on the search history, as in the
+vanilla server); the End biome is derived from the erosion function evaluated at the centre of the 16x16 section.
 
 ## Terrain shape test (milestone 5, part 2)
 

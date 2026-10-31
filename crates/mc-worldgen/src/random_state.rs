@@ -1,5 +1,6 @@
 //! `RandomState` (the seeded noise instances and the wired `NoiseRouter`), the noise settings and the loading of the worldgen JSON.
 
+use crate::climate::{Parameter, ParameterPoint, Sampler};
 use crate::density::{Blended, DensityRegistry, Df, Mapper, Node, NoiseHolder, Visitor, end_island_noise};
 use crate::noise::{BlendedNoise, NormalNoise};
 use crate::random::{LegacyRandomSource, PositionalRandomFactory, RandomSource, XoroshiroRandomSource};
@@ -106,6 +107,36 @@ pub struct GeneratorSettings {
     pub default_block: Value,
     pub default_fluid: Value,
     pub router: Value,
+    /// `spawn_target`: where the world spawn is searched (empty outside of the overworld)
+    pub spawn_target: Vec<ParameterPoint>,
+}
+
+/// A climate parameter in JSON: a number (a point) or `[min, max]` (or `{"min": .., "max": ..}`), read as `float` like the Mojang codec.
+fn parse_parameter(v: &Value) -> Result<Parameter> {
+    let float = |x: &Value| -> Result<f32> {
+        match x {
+            Value::Number(n) => n.to_string().parse::<f32>().map_err(|e| anyhow!("bad climate value {n}: {e}")),
+            _ => Err(anyhow!("bad climate value {x}")),
+        }
+    };
+    let (min, max) = match v {
+        Value::Array(a) if a.len() == 2 => (float(&a[0])?, float(&a[1])?),
+        Value::Object(o) => (float(o.get("min").ok_or_else(|| anyhow!("missing min"))?)?, float(o.get("max").ok_or_else(|| anyhow!("missing max"))?)?),
+        single => (float(single)?, float(single)?),
+    };
+    if min > max {
+        return Err(anyhow!("Cannon construct interval, min > max ({min} > {max})"));
+    }
+    Ok(Parameter::span(min, max))
+}
+
+fn parse_parameter_point(v: &Value) -> Result<ParameterPoint> {
+    let p = |k: &str| parse_parameter(v.get(k).ok_or_else(|| anyhow!("spawn_target: missing {k}"))?);
+    let offset = match v.get("offset") {
+        Some(Value::Number(n)) => n.to_string().parse::<f32>()?,
+        _ => return Err(anyhow!("spawn_target: missing offset")),
+    };
+    Ok(ParameterPoint::new(p("temperature")?, p("humidity")?, p("continentalness")?, p("erosion")?, p("depth")?, p("weirdness")?, offset))
 }
 
 impl GeneratorSettings {
@@ -121,6 +152,10 @@ impl GeneratorSettings {
             default_block: v["default_block"].clone(),
             default_fluid: v["default_fluid"].clone(),
             router: v["noise_router"].clone(),
+            spawn_target: match v.get("spawn_target").and_then(Value::as_array) {
+                Some(list) => list.iter().map(parse_parameter_point).collect::<Result<Vec<_>>>()?,
+                None => Vec::new(),
+            },
         })
     }
 }
@@ -196,6 +231,21 @@ pub struct RandomState {
     pub aquifer_random: PositionalRandomFactory,
     pub ore_random: PositionalRandomFactory,
     pub router: NoiseRouter,
+    /// `RandomState.sampler`: the climate functions without caches or holders, used by the biome source and the spawn search
+    pub sampler: Sampler,
+}
+
+/// The visitor `RandomState` maps the climate functions with: references and markers are replaced by the function they wrap.
+struct Unwrap;
+
+impl Visitor for Unwrap {
+    fn apply(&mut self, n: Df) -> Df {
+        match &*n {
+            Node::HolderRef(f) => f.clone(),
+            Node::Marker { wrapped, .. } => wrapped.clone(),
+            _ => n,
+        }
+    }
 }
 
 struct Wiring<'a> {
@@ -263,6 +313,17 @@ impl RandomState {
         let cache = RefCell::new(HashMap::new());
         let mut wiring = Wiring { random: &random, noises: &data.noises, cache: &cache, legacy: settings.legacy_random_source, seed };
         let router = NoiseRouter::decode(&data.density, &settings.router)?.map_all(&mut wiring);
-        Ok(Self { seed, random, aquifer_random, ore_random, router })
+        let mut unwrap = Unwrap;
+        let mut m = Mapper::new(&mut unwrap);
+        let sampler = Sampler {
+            temperature: m.map_all(&router.temperature),
+            humidity: m.map_all(&router.vegetation),
+            continentalness: m.map_all(&router.continents),
+            erosion: m.map_all(&router.erosion),
+            depth: m.map_all(&router.depth),
+            weirdness: m.map_all(&router.ridges),
+            spawn_target: settings.spawn_target.clone(),
+        };
+        Ok(Self { seed, random, aquifer_random, ore_random, router, sampler })
     }
 }

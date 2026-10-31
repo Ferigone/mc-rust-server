@@ -535,6 +535,11 @@ impl NoiseChunk {
 
     // ---------------------------------------------------------------- aquifer
 
+    /// `Aquifer.computeSubstance` at a block position (the carvers ask it with a density of 0)
+    pub fn aquifer_substance_at(&self, x: i32, y: i32, z: i32, density: f64) -> Option<u16> {
+        self.aquifer_substance(&Ctx::point(x, y, z), density)
+    }
+
     fn aquifer_substance(&self, ctx: &Ctx<'_>, density: f64) -> Option<u16> {
         let air = self.blocks.air;
         match &self.aquifer {

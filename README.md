@@ -3,7 +3,7 @@
 A port of the **Minecraft: Java Edition 1.21 / 1.21.1** server (protocol **767**) to Rust. The goal is 1:1 behaviour
 with the vanilla server, so that an unmodified Java 1.21 client can connect and play.
 
-> **Status: milestone 5 of about 12 is under way (world generation: the terrain shape, the biome source and the surface rules are done; carvers / features / structures are not) (see [docs/ROADMAP.md](docs/ROADMAP.md)).** This is a foundation, not a complete port.
+> **Status: milestone 5 of about 12 is under way (world generation: terrain shape, biomes, surface rules and carvers are done and run in the server; features / structures are not) (see [docs/ROADMAP.md](docs/ROADMAP.md)).** This is a foundation, not a complete port.
 > Vanilla is ~4,000 classes and ~470,000 lines of code; this document states exactly what works and has been verified,
 > and what is still missing. It has not been tested with a real Minecraft client (none is available in the build
 > environment); it has been tested against Mojang's own decoders and in a differential test against the real vanilla
@@ -24,15 +24,16 @@ with the vanilla server, so that an unmodified Java 1.21 client can connect and 
 | **Terrain shape** (`crates/mc-worldgen`): random sources, all noise functions, the data-driven density function graph with splines, the wired `NoiseRouter`, `NoiseChunk` (cell interpolation, caches), the aquifer (water / lava lakes) and ore veins, for every vanilla noise setting (overworld, amplified, large biomes, nether, end, caves, floating islands) | ✅ bit-identical to the Mojang classes: 878 random / noise values, 5,760 router values, 34 generated chunks; wired into the server (see below) |
 | **Biome source** (`crates/mc-worldgen`): `Climate` (quantized parameters, the parameter-space R-tree with its thread-local shortcut, the sampler, the world spawn search), the overworld parameter table (`OverworldBiomeBuilder`, 7,593 entries), the nether preset and the End island biomes | ✅ identical to the Mojang classes: all list entries, 160,000 R-tree searches including exact ties, 79,300 biomes sampled from 13 seeds / settings, 9 spawn searches; wired into the server (see below) |
 | **Surface stage** (`crates/mc-worldgen`): `SurfaceSystem` and `SurfaceRules` compiled from the `surface_rule` JSON (all 11 conditions, bandlands, bedrock floor / roof, noise thresholds), clay bands, eroded badlands pillars, frozen-ocean icebergs, the `BiomeManager` zoom (SHA-256 seed, fiddled distances), the biome temperature (`PerlinSimplexNoise`, frozen modifier), the `WORLD_SURFACE_WG` heightmap | ✅ identical to the Mojang classes: 223 chunks (the first chunk of each of 63 biomes, 9 noise settings / seeds incl. nether and End), every block and the heightmap; wired into the server (see below) |
-| **World generation in the server** (`crates/mc-server/src/worldgen.rs`): new worlds with `level-type` normal / large_biomes / amplified (and worlds of the vanilla server with a noise generator) get the ported terrain, biomes and surface for every chunk that is not stored in the region files; generation runs on background threads, a chunk is sent once it and its eight neighbours exist; the initial world spawn follows `MinecraftServer.setInitialSpawn` (`Climate` spawn search, then the first suitable column of the chunk spiral) | ✅ works (the probe joins a generated world and decodes the chunks); the terrain is exact only up to the surface stage, see "What is still missing" |
+| **Carvers** (`crates/mc-worldgen/src/carver.rs`): `CaveWorldCarver`, `CanyonWorldCarver`, `NetherWorldCarver`, `CarvingMask`, the 17x17-chunk `applyCarvers` loop with `setLargeFeatureSeed`, float/height providers, `Mth.sin/cos` tables, the re-grassing of dirt below a cave roof (`SurfaceSystem.topMaterial`) | ✅ identical to the Mojang classes: 223 chunks of 9 settings (overworld, amplified, large biomes, nether, ...) after surface and carvers |
+| **World generation in the server** (`crates/mc-server/src/worldgen.rs`): new worlds with `level-type` normal / large_biomes / amplified (and worlds of the vanilla server with a noise generator) get the ported terrain, biomes, surface and carvers (caves, canyons) for every chunk that is not stored in the region files; generation runs on background threads, a chunk is sent once it and its eight neighbours exist; the initial world spawn follows `MinecraftServer.setInitialSpawn` (`Climate` spawn search, then the first suitable column of the chunk spiral) | ✅ works (the probe joins a generated world and decodes the chunks); the terrain is exact only up to the surface stage, see "What is still missing" |
 | Block placement uses the real item→block mapping, replaceable blocks, and the real collision shapes against player hitboxes | ✅ (default block state only until `getStateForPlacement`, M7) |
 | **Worlds on disk**: Anvil regions (`.mca`, zlib/gzip/LZ4/uncompressed, external `.mcc`), `level.dat`, `playerdata/*.dat` (position, game mode, health, food, XP, inventory), stored heightmaps/light/block entities, `level-name`/`level-seed`, autosave, graceful save on Ctrl+C/SIGTERM | ✅ loads worlds of the vanilla server and writes worlds the vanilla server loads (see below) |
 | `server.properties` (same keys and defaults as vanilla) | ✅ read/write |
 
 ## What is still missing (honestly)
 
-The last stages of normal world generation: carvers (caves, canyons), features (trees, ores, flowers, lakes, ...), structures (villages, strongholds, ...)
-and the `Beardifier`: new normal worlds already have the exact terrain, biomes and surface blocks of vanilla, but no caves, trees or villages yet,
+The last stages of normal world generation: features (trees, ores, flowers, lakes, ...), structures (villages, strongholds, ...)
+and the `Beardifier`: new normal worlds already have the exact terrain, biomes, surface blocks, caves and canyons of vanilla, but no trees, ores or villages yet,
 and the Nether and End are not reachable. Chunk generation is also not optimised yet (about 30 chunks per second on 4 cores). `light_update` packets after block edits (edited chunks are saved without light and relit by vanilla), non-player entities (mobs, items, AI), physics/collisions, inventory and crafting
 (recipes are sent empty), block behaviour (placement states, redstone, fluids), commands other than `/list`
 (and the command tree), ops/whitelist/bans, signed chat, advancements, scoreboards, Nether/End, RCON/query.
@@ -77,6 +78,7 @@ Mojang's servers onto the user's machine. Running the original server requires a
 | `tools/vanilla_compare.sh` | Differential test against the real vanilla server (requires `MC_EULA_ACCEPTED=true`). |
 | `tools/world_compare.sh`, `tools/world_compare.py` | World persistence test: vanilla generates a world, both servers load it and their chunk packets are compared; then the Rust server edits and saves the world and vanilla loads it (requires `MC_EULA_ACCEPTED=true`). |
 | `tools/remap.sh` | Produces `server-named.jar`, the vanilla server with Mojang's official names (shared by the tools below). |
+| `tools/verify_carvers.sh` | Runs the real surface stage and carvers (`SurfaceRef.java` with `carve`, 9 settings, 223 chunks) and compares the Rust port. |
 | `tools/worldgen_smoke.sh` | Starts a fresh normal world and lets the bot join (chunk packets of generated terrain decode, no panic). |
 | `tools/terrain_check.sh` | Generates again the chunks of a world made by the vanilla server and compares the blocks (`mc-server --check-terrain`). |
 | `tools/verify_surface.sh` | Runs the real surface stage (`tools/terrain/.../SurfaceRef.java`, 9 settings, 223 chunks) and compares blocks and heightmaps with the Rust port. |
@@ -249,18 +251,34 @@ Quirks reproduced on the way: `LevelChunkSection.recalcBlockCounts` counts every
 fastutil iteration order for block entities, `java.util.HashMap` order for NBT compounds, palette order of unchanged
 sections.
 
+## Carver test (milestone 5, part 6)
+
+`tools/verify_carvers.sh` runs the real surface stage **and the real carvers** (`ChunkGenerator.applyCarvers`, the `AIR` step: `ConfiguredWorldCarver.carve` for
+every carver that starts in the 17x17 chunks around the target, `CarvingContext`, `CarvingMask`, the aquifer of the chunk's `NoiseChunk`) for the same 223 chunks
+of 9 settings as the surface test, and `crates/mc-worldgen/tests/surface_parity.rs` (`carvers_match_the_real_carvers`) compares the Rust port: **all 223 chunks are
+identical** (blocks and heightmaps). Mutation checks (not committed): 15 of 17 changes fail the test (cave thickness, tunnel / canyon pitch and yaw rules, room size,
+`canReach` margin, the top limit of the ellipsoid, the re-grassing below a roof, the large feature seed, the number of caves per start chunk, the sine table, the
+tunnel split step, the canyon width smoothness, the nether lava level, the water height of the top material). Two cannot fail it: removing the `CarvingMask` check
+(carving an already carved block does nothing, the mask is a speed-up) and `>=` instead of `>` in the cave ellipsoid (an exact tie of a sum of squares with 1.0).
+
+Vanilla details reproduced: `Mth.sin` / `Mth.cos` are lookups in a 65536-entry table; the nether and overworld carvers use different `carveBlock`s (the nether one ignores
+the aquifer and fills lava up to `minGenY + 31`); the biome manager of the carvers asks the biome source directly instead of the stored chunk biomes; and
+`ChunkAccess.getBlockState` answers plain `air` for every position of a section that holds only air-class blocks, even where it stores `cave_air` (the test applies the
+same view to the Rust chunk; the stored section keeps `cave_air`, which is what the server sends). This also found that a harness must bind the block tags after loading the
+data pack (the carvers' `replaceable` sets are tags): without it the real carvers replace nothing.
+
 ## Generator integration check (milestone 5, part 5)
 
 New worlds with `level-type=minecraft:normal` (and `large_biomes`, `amplified`) and chunks that a vanilla world does not store are generated by the
 ported pipeline on background threads (`crates/mc-server/src/worldgen.rs`). `tools/worldgen_smoke.sh` starts a fresh normal world and lets the bot
-join: the chunk packets decode and nothing panics. `tools/terrain_check.sh` (`mc-server --check-terrain`) generates again every chunk stored in a
-world made by the **real vanilla server** (289 chunks of seed 12345) and compares the blocks; this is not an equality test, because vanilla also
-carves caves and places features and structures, but it proves that seed, coordinates and heights are right: **90.31 % of the 28.4 million blocks
-are identical** and the highest solid non-foliage block of **95.93 %** of the columns is at the same height. The differences are what the missing
-stages produce: caves (`air -> deepslate`, `air -> stone`), the underground blobs of clay, tuff, andesite, diorite, granite, gravel and dirt, ores, sculk and water
-lakes. `tools/vanilla_compare.sh` (superflat) still matches 38 / 38 against the vanilla server.
+join: the chunk packets decode and nothing panics. `tools/terrain_check.sh` (`mc-server --check-terrain`) generates again every chunk stored in a world made by the **real vanilla server** (289 chunks of
+seed 12345) and compares the blocks; this is not an equality test, because vanilla also places features and structures, but it proves that seed,
+coordinates and heights are right: **91.08 % of the 28.4 million blocks are identical** (90.31 % before the carvers were added) and the highest solid
+non-foliage block of **97.93 %** of the columns is at the same height. The differences are what the missing stages produce: the underground blobs of
+clay, tuff, andesite, diorite, granite, gravel and dirt, ores, sculk and moss (features), trees, and air from mineshafts, geodes and other structures.
+`tools/vanilla_compare.sh` (superflat) still matches 38 / 38 against the vanilla server.
 
-Generation speed is about 35 ms per chunk and core (4 threads: about 30 chunks per second, a view distance of 8 fills in roughly 10 seconds);
+Generation speed is about 80 ms per chunk and core with the carvers (4 threads: about 25 chunks per second, a view distance of 8 fills in roughly 12 seconds);
 unmodified generated chunks are not saved, they are generated again after they were unloaded, so later generator stages improve them without migration.
 
 ## Architecture

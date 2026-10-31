@@ -1,13 +1,14 @@
 //! The chunk generator of the server: the ported world generation pipeline (noise terrain, biomes, surface) behind a thread pool.
 //!
 //! Everything in `crates/mc-worldgen` is verified against the Mojang classes; this module only glues it to the server's chunk model.
-//! Missing stages (carvers, features, structures) are listed in `docs/ROADMAP.md`: generated terrain has no caves, trees or villages yet.
+//! Missing stages (features, structures) are listed in `docs/ROADMAP.md`: generated terrain has caves and canyons but no trees or villages yet.
 
 use crate::world::Dimension;
 use anyhow::{anyhow, Context, Result};
 use mc_data::GameData;
 use mc_worldgen::biome_climate::BiomeClimate;
 use mc_worldgen::biome_manager::{BiomeManager, ChunkBiomes};
+use mc_worldgen::carver::{apply_carvers, CarveEnv, CarveStates, CarverSet, CarvingMask};
 use mc_worldgen::biome_source::BiomeSource;
 use mc_worldgen::noise_chunk::NoiseChunk;
 use mc_worldgen::random_state::{GeneratorSettings, NoiseSettings, RandomState, TerrainBlocks, WorldgenData};
@@ -42,6 +43,9 @@ pub struct Generator {
     source: BiomeSource,
     system: SurfaceSystem,
     rule: SurfaceRule,
+    range: GenContext,
+    carvers: CarverSet,
+    carve_states: CarveStates,
     climates: HashMap<String, BiomeClimate>,
     game: Arc<GameData>,
     biome_cache: Mutex<HashMap<(i32, i32), Arc<ChunkBiomes>>>,
@@ -84,6 +88,8 @@ impl Generator {
         let noise = NoiseSettings { min_y: min, height, ..settings.noise };
         let range = GenContext { min_y: dim.min_y.max(settings.noise.min_y), height: dim.height.min(settings.noise.height) };
         let rule = SurfaceRule::compile(&settings.surface_rule, &state, &game.blocks, range)?;
+        let carvers = CarverSet::load(&game.root, &game.blocks)?;
+        let carve_states = CarveStates::resolve(&game.blocks)?;
         let system = SurfaceSystem::new(&state, default_block, settings.sea_level, SurfaceStates::resolve(&game.blocks)?)?;
         let source = match kind {
             BiomeSourceKind::Overworld => BiomeSource::overworld(),
@@ -100,6 +106,9 @@ impl Generator {
             source,
             system,
             rule,
+            range,
+            carvers,
+            carve_states,
             climates: data.biomes,
             game,
             biome_cache: Mutex::new(HashMap::new()),
@@ -147,6 +156,22 @@ impl Generator {
         let biome_at = |x: i32, y: i32, z: i32| manager.get_biome(x, y, z);
         let climate = |n: &str| self.climates.get(n).cloned();
         self.system.build_surface(&mut chunk, &noise_chunk, &self.rule, &biome_at, &climate, &query, self.settings.legacy_random_source);
+        // carvers: the biome manager of the carving context asks the biome source directly
+        let direct = |qx: i32, qy: i32, qz: i32| self.source.get_noise_biome(qx, qy, qz, &self.state.sampler);
+        let carve_manager = BiomeManager::new(&direct, self.seed);
+        let carve_biome_at = |x: i32, y: i32, z: i32| carve_manager.get_biome(x, y, z);
+        let env = CarveEnv {
+            range: self.range,
+            noise_chunk: &noise_chunk,
+            system: &self.system,
+            rule: &self.rule,
+            biome_at: &carve_biome_at,
+            climate: &climate,
+            query: &query,
+            states: self.carve_states,
+        };
+        let mut mask = CarvingMask::new(height, min_y);
+        apply_carvers(&env, &mut chunk, &mut mask, self.seed, &self.source, &self.state.sampler, &self.carvers);
         Generated { blocks: chunk.blocks, biomes: grids.remove(&(cx, cz)).unwrap() }
     }
 }

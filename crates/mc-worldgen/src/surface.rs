@@ -95,14 +95,14 @@ pub struct GenContext {
 }
 
 #[derive(Clone, Copy, Debug)]
-enum Anchor {
+pub enum Anchor {
     Absolute(i32),
     AboveBottom(i32),
     BelowTop(i32),
 }
 
 impl Anchor {
-    fn parse(v: &Value) -> Result<Self> {
+    pub fn parse(v: &Value) -> Result<Self> {
         if let Some(y) = v.get("absolute").and_then(Value::as_i64) {
             Ok(Anchor::Absolute(y as i32))
         } else if let Some(y) = v.get("above_bottom").and_then(Value::as_i64) {
@@ -114,7 +114,7 @@ impl Anchor {
         }
     }
 
-    fn resolve(&self, g: GenContext) -> i32 {
+    pub fn resolve(&self, g: GenContext) -> i32 {
         match *self {
             Anchor::Absolute(y) => y,
             Anchor::AboveBottom(o) => g.min_y + o,
@@ -298,15 +298,20 @@ impl SurfaceChunk {
         Self { chunk_x, chunk_z, min_y, height, blocks, world_surface_wg: hm, post_process: Vec::new() }
     }
 
-    fn get(&self, x: i32, y: i32, z: i32, air: u16) -> u16 {
+    pub(crate) fn get(&self, x: i32, y: i32, z: i32, air: u16) -> u16 {
         if y < self.min_y || y >= self.min_y + self.height {
             return air; // VOID_AIR
         }
         self.blocks[(((y - self.min_y) as usize) << 8) | ((z & 15) << 4) as usize | (x & 15) as usize]
     }
 
-    /// `BlockColumn.setBlock` + `ProtoChunk.setBlockState` (heightmap update included)
+    /// `BlockColumn.setBlock`: `ProtoChunk.setBlockState` (heightmap update included) and, for fluids, `markPosForPostprocessing`.
     fn set(&mut self, x: i32, y: i32, z: i32, state: u16, q: &dyn BlockQuery, air: u16) {
+        self.set_block(x, y, z, state, q, air, true);
+    }
+
+    /// `ProtoChunk.setBlockState` (heightmap update included); `mark_fluid` adds fluids to the post-processing list.
+    pub(crate) fn set_block(&mut self, x: i32, y: i32, z: i32, state: u16, q: &dyn BlockQuery, air: u16, mark_fluid: bool) {
         if y < self.min_y || y >= self.min_y + self.height {
             return;
         }
@@ -332,9 +337,21 @@ impl SurfaceChunk {
                 self.world_surface_wg[idx] = found;
             }
         }
-        if q.has_fluid(state) {
+        if mark_fluid && q.has_fluid(state) {
             self.post_process.push((x, y, z));
         }
+    }
+
+    /// The blocks as `ChunkAccess.getBlockState` reports them: `LevelChunkSection.hasOnlyAir()` sections answer plain `air` for every
+    /// position, even where they hold `cave_air` (a vanilla quirk: the stored section keeps the `cave_air`).
+    pub fn vanilla_view(&self, q: &dyn BlockQuery, air: u16) -> Vec<u16> {
+        let mut out = self.blocks.clone();
+        for section in out.chunks_mut(4096) {
+            if section.iter().all(|&b| q.is_air(b)) {
+                section.fill(air);
+            }
+        }
+        out
     }
 
     /// `ChunkAccess.getHeight(WORLD_SURFACE_WG, x, z)`: the y of the highest block (the first available y minus one)
@@ -480,6 +497,24 @@ impl SurfaceSystem {
                 }
             }
         }
+    }
+
+    /// `SurfaceSystem.topMaterial`: what the surface rules put at `(x, y, z)` (used by the carvers to re-grass the dirt below a cave roof).
+    #[allow(clippy::too_many_arguments)]
+    pub fn top_material(
+        &self,
+        rule: &SurfaceRule,
+        noise_chunk: &NoiseChunk,
+        chunk: &SurfaceChunk,
+        biome_at: &dyn Fn(i32, i32, i32) -> &'static str,
+        climate: &dyn Fn(&str) -> Option<BiomeClimate>,
+        (x, y, z): (i32, i32, i32),
+        has_fluid: bool,
+    ) -> Option<u16> {
+        let mut ctx = Context::new(self, noise_chunk, biome_at, climate, rule.cache_slots);
+        ctx.update_xz(x, z);
+        ctx.update_y(1, 1, if has_fluid { y + 1 } else { i32::MIN }, x, y, z);
+        ctx.try_apply(&rule.rule, chunk, x, y, z)
     }
 
     fn eroded_badlands_extension(&self, chunk: &mut SurfaceChunk, x: i32, z: i32, height: i32, q: &dyn BlockQuery) {

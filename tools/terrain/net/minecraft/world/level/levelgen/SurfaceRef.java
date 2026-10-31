@@ -7,6 +7,7 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -28,9 +29,12 @@ import net.minecraft.server.Bootstrap;
 import net.minecraft.server.packs.PackType;
 import net.minecraft.server.packs.repository.ServerPacksSource;
 import net.minecraft.server.packs.resources.MultiPackResourceManager;
+import net.minecraft.tags.TagKey;
+import net.minecraft.tags.TagLoader;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.LevelHeightAccessor;
 import net.minecraft.world.level.biome.Biome;
+import net.minecraft.world.level.biome.BiomeGenerationSettings;
 import net.minecraft.world.level.biome.BiomeManager;
 import net.minecraft.world.level.biome.BiomeSource;
 import net.minecraft.world.level.biome.Climate;
@@ -40,16 +44,22 @@ import net.minecraft.world.level.biome.TheEndBiomeSource;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.chunk.CarvingMask;
 import net.minecraft.world.level.chunk.ProtoChunk;
 import net.minecraft.world.level.chunk.UpgradeData;
 import net.minecraft.world.level.chunk.status.ChunkStatus;
 import net.minecraft.world.level.levelgen.blending.Blender;
+import net.minecraft.world.level.levelgen.carver.CarvingContext;
+import net.minecraft.world.level.levelgen.carver.ConfiguredWorldCarver;
 import net.minecraft.world.level.levelgen.synth.NormalNoise;
 
 /**
  * Runs the REAL surface stage: biomes of the chunk and its neighbours (BiomeSource), the NoiseChunk fill loop (doFill without structures)
  * and SurfaceSystem.buildSurface with the BiomeManager, for the first chunk found for every biome in a spiral around the origin.
- *   SurfaceRef <out file> <noise settings> <seed> <overworld|nether|end> <minY> <height> <maxRingChunks> <stepChunks>
+ *   SurfaceRef <out file> <noise settings> <seed> <overworld|nether|end> <minY> <height> <maxRingChunks> <stepChunks> [carve]
+ * The blocks are read with ChunkAccess.getBlockState, which returns plain air for every block of a section that holds only air-class blocks
+ * (the test applies the same view to the Rust chunk).
+ * With "carve" the carvers (ChunkGenerator.applyCarvers, AIR step) run after the surface and the blocks are written after them.
  * File (big endian ints, little endian shorts / ints in the arrays): int count, then per chunk
  *   int cx, int cz, byte nameLength, name (the biome at the chunk centre), height*256 shorts (block state ids, (y - minY) << 8 | z << 4 | x),
  *   256 ints (the WORLD_SURFACE_WG heightmap after the surface stage, x + z * 16, absolute y).
@@ -96,12 +106,25 @@ public class SurfaceRef {
         nc.stopInterpolation();
     }
 
+    /** The block tags referenced by the carvers (`replaceable`) are bound after the data pack was decoded, like ReloadableServerResources.updateRegistryTags. */
+    static <T> void bindTags(MultiPackResourceManager rm, RegistryAccess.RegistryEntry<T> entry) {
+        ResourceKey<? extends Registry<T>> key = entry.key();
+        Registry<T> registry = entry.value();
+        TagLoader<Holder<T>> loader = new TagLoader<>(registry::getHolder, Registries.tagsDirPath(key));
+        Map<TagKey<T>, List<Holder<T>>> bound = new HashMap<>();
+        for (Map.Entry<ResourceLocation, Collection<Holder<T>>> e : loader.loadAndBuild(rm).entrySet()) {
+            bound.put(TagKey.create(key, e.getKey()), List.copyOf(e.getValue()));
+        }
+        registry.bindTags(bound);
+    }
+
     public static void main(String[] args) throws Exception {
         SharedConstants.tryDetectVersion();
         Bootstrap.bootStrap();
         MultiPackResourceManager rm = new MultiPackResourceManager(PackType.SERVER_DATA, List.of(ServerPacksSource.createVanillaPackSource()));
         RegistryAccess staticAccess = RegistryAccess.fromRegistryOfRegistries(BuiltInRegistries.REGISTRY);
         RegistryAccess.Frozen wg = RegistryDataLoader.load(rm, staticAccess, RegistryDataLoader.WORLDGEN_REGISTRIES);
+        staticAccess.registries().filter(e -> e.key().equals(Registries.BLOCK)).forEach(e -> bindTags(rm, e));
 
         String outFile = args[0];
         ResourceLocation settingsName = ResourceLocation.parse(args[1]);
@@ -111,6 +134,7 @@ public class SurfaceRef {
         int height = Integer.parseInt(args[5]);
         int maxRing = Integer.parseInt(args[6]);
         int step = Integer.parseInt(args[7]);
+        boolean carve = args.length > 8 && args[8].equals("carve");
         Registry<NoiseGeneratorSettings> settingsReg = wg.registryOrThrow(Registries.NOISE_SETTINGS);
         NoiseGeneratorSettings settings = settingsReg.getOrThrow(ResourceKey.create(Registries.NOISE_SETTINGS, settingsName));
         HolderGetter<NormalNoise.NoiseParameters> noises = wg.lookupOrThrow(Registries.NOISE);
@@ -170,6 +194,29 @@ public class SurfaceRef {
                 (qx, qy, qz) -> chunks.get(ChunkPos.asLong(QuartPos.toSection(qx), QuartPos.toSection(qz))).getNoiseBiome(qx, qy, qz),
                 BiomeManager.obfuscateSeed(seed));
             random.surfaceSystem().buildSurface(random, manager, biomeRegistry, settings.useLegacyRandomSource(), new WorldGenerationContext(generator, accessor), chunk, nc, settings.surfaceRule());
+            if (carve) {
+                // ChunkGenerator.applyCarvers without the WorldGenRegion: the biome manager asks the biome source directly
+                BiomeManager carveManager = new BiomeManager((qx, qy, qz) -> source.getNoiseBiome(qx, qy, qz, sampler), BiomeManager.obfuscateSeed(seed));
+                CarvingContext carving = new CarvingContext(generator, wg, accessor, nc, random, settings.surfaceRule());
+                CarvingMask mask = chunk.getOrCreateCarvingMask(GenerationStep.Carving.AIR);
+                Aquifer aquifer = nc.aquifer();
+                WorldgenRandom carveRandom = new WorldgenRandom(new LegacyRandomSource(0L));
+                for (int dx = -8; dx <= 8; dx++) {
+                    for (int dz = -8; dz <= 8; dz++) {
+                        ChunkPos cp = new ChunkPos(cx + dx, cz + dz);
+                        BiomeGenerationSettings gs = source.getNoiseBiome(QuartPos.fromBlock(cp.getMinBlockX()), 0, QuartPos.fromBlock(cp.getMinBlockZ()), sampler).value().getGenerationSettings();
+                        int index = 0;
+                        for (Holder<ConfiguredWorldCarver<?>> holder : gs.getCarvers(GenerationStep.Carving.AIR)) {
+                            ConfiguredWorldCarver<?> carver = holder.value();
+                            carveRandom.setLargeFeatureSeed(seed + (long) index, cp.x, cp.z);
+                            if (carver.isStartChunk(carveRandom)) {
+                                carver.carve(carving, chunk, carveManager::getBiome, carveRandom, aquifer, cp, mask);
+                            }
+                            index++;
+                        }
+                    }
+                }
+            }
 
             out.writeInt(cx);
             out.writeInt(cz);

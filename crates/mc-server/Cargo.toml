@@ -1,0 +1,26 @@
+[package]
+name = "mc-server"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "mc-server"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+bytes.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+md-5.workspace = true
+sha1.workspace = true
+rand.workspace = true
+rsa.workspace = true
+aes.workspace = true
+mc-protocol.workspace = true
+mc-data.workspace = true
+ureq = { version = "2", default-features = false, features = ["tls"] }
+sha2 = "0.10"

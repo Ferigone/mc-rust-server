@@ -1,0 +1,40 @@
+#!/usr/bin/env python3
+"""Generuje crates/mc-protocol/src/ids.rs z oficjalnego raportu packets.json (data generator Mojang)."""
+import json, sys, re
+
+src = sys.argv[1] if len(sys.argv) > 1 else "reference/gen/generated/reports/packets.json"
+dst = sys.argv[2] if len(sys.argv) > 2 else "crates/mc-protocol/src/ids.rs"
+p = json.load(open(src))
+
+out = ["// AUTO-GENERATED przez tools/gen_packet_ids.py z reports/packets.json (Minecraft 1.21.1, protokół 767).",
+       "// Nie edytować ręcznie.", "#![allow(dead_code)]", "",
+       "pub const PROTOCOL_VERSION: i32 = 767;", ""]
+for state in ["handshake", "status", "login", "configuration", "play"]:
+    out.append(f"pub mod {state} {{")
+    for d in ["serverbound", "clientbound"]:
+        if d not in p[state]:
+            continue
+        out.append(f"    pub mod {d} {{")
+        for name, v in sorted(p[state][d].items(), key=lambda kv: kv[1]["protocol_id"]):
+            n = re.sub(r"[^A-Za-z0-9]", "_", name.split(":", 1)[1]).upper()
+            out.append(f"        pub const {n}: i32 = {v['protocol_id']};")
+        out.append("    }")
+    out.append("}")
+    out.append("")
+# tabele nazw (id -> nazwa) do logów i narzędzi diagnostycznych
+out.append("pub mod names {")
+for state in ["handshake", "status", "login", "configuration", "play"]:
+    for d in ["serverbound", "clientbound"]:
+        if d not in p[state]:
+            continue
+        out.append(f"    pub fn {state}_{d}(id: i32) -> &'static str {{")
+        out.append("        match id {")
+        for name, v in sorted(p[state][d].items(), key=lambda kv: kv[1]["protocol_id"]):
+            out.append(f"            {v['protocol_id']} => \"{name.split(':', 1)[1]}\",")
+        out.append("            _ => \"?\",")
+        out.append("        }")
+        out.append("    }")
+out.append("}")
+out.append("")
+open(dst, "w").write("\n".join(out))
+print("wrote", dst)

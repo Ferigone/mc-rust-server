@@ -184,6 +184,26 @@ public class BiomeRef {
                 OUT.append("spawn.").append(a - 1).append('\t').append(spawn.getX()).append(',').append(spawn.getY()).append(',').append(spawn.getZ()).append('\n');
             }
         }
+        // phase E: the temperature of every biome (the value behind coldEnoughToSnow / shouldMeltFrozenOceanIcebergSlightly) at many positions
+        Registry<Biome> biomeRegistry = wg.registryOrThrow(Registries.BIOME);
+        java.lang.reflect.Method getTemperature = Biome.class.getDeclaredMethod("getTemperature", BlockPos.class);
+        getTemperature.setAccessible(true);
+        List<ResourceLocation> biomeNames = new ArrayList<>();
+        for (ResourceLocation id : biomeRegistry.keySet()) biomeNames.add(id);
+        java.util.Collections.sort(biomeNames);
+        int[] ys = {-60, 40, 63, 80, 81, 90, 120, 200, 319};
+        for (ResourceLocation id : biomeNames) {
+            Biome biome = biomeRegistry.get(id);
+            for (int i = 0; i < 400; i++) {
+                int x = (i * 7919 + i * i * 31) % 20001 - 10000;
+                int z = (i * 104729 + i * i * 17) % 20001 - 10000;
+                int y = ys[i % ys.length];
+                BlockPos pos = new BlockPos(x, y, z);
+                float t = (Float) getTemperature.invoke(biome, pos);
+                OUT.append("clim.").append(id).append('.').append(i).append('\t').append(Float.floatToRawIntBits(t)).append(',')
+                    .append(biome.coldEnoughToSnow(pos)).append(',').append(biome.shouldMeltFrozenOceanIcebergSlightly(pos)).append('\n');
+            }
+        }
         Files.writeString(Path.of(args[0]), OUT.toString());
         System.out.println("RESULT: wrote " + OUT.chars().filter(c -> c == '\n').count() + " biome reference lines");
     }

@@ -1,5 +1,6 @@
 //! `RandomState` (the seeded noise instances and the wired `NoiseRouter`), the noise settings and the loading of the worldgen JSON.
 
+use crate::biome_climate::BiomeClimate;
 use crate::climate::{Parameter, ParameterPoint, Sampler};
 use crate::density::{Blended, DensityRegistry, Df, Mapper, Node, NoiseHolder, Visitor, end_island_noise};
 use crate::noise::{BlendedNoise, NormalNoise};
@@ -9,7 +10,7 @@ use serde_json::Value;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// `NormalNoise.NoiseParameters`
 #[derive(Clone, Debug)]
@@ -23,6 +24,8 @@ pub struct WorldgenData {
     pub density: DensityRegistry,
     pub noises: HashMap<String, NoiseParams>,
     pub noise_settings: HashMap<String, Value>,
+    /// the climate of every biome (`worldgen/biome/*.json`), keyed by `minecraft:name`
+    pub biomes: HashMap<String, BiomeClimate>,
 }
 
 fn collect_json(dir: &Path, prefix: &str, out: &mut HashMap<String, Value>) -> Result<()> {
@@ -50,6 +53,9 @@ impl WorldgenData {
         collect_json(&dir.join("density_function"), "", &mut df)?;
         collect_json(&dir.join("noise"), "", &mut noises)?;
         collect_json(&dir.join("noise_settings"), "", &mut settings)?;
+        let mut biome_json = HashMap::new();
+        collect_json(&dir.join("biome"), "", &mut biome_json)?;
+        let biomes = biome_json.iter().map(|(k, v)| Ok((k.clone(), BiomeClimate::from_json(v).with_context(|| k.clone())?))).collect::<Result<HashMap<_, _>>>()?;
         let noises = noises
             .into_iter()
             .map(|(k, v)| {
@@ -60,7 +66,7 @@ impl WorldgenData {
                 Ok((k, params))
             })
             .collect::<Result<HashMap<_, _>>>()?;
-        Ok(Self { density: DensityRegistry::new(df), noises, noise_settings: settings })
+        Ok(Self { density: DensityRegistry::new(df), noises, noise_settings: settings, biomes })
     }
 }
 
@@ -107,6 +113,7 @@ pub struct GeneratorSettings {
     pub default_block: Value,
     pub default_fluid: Value,
     pub router: Value,
+    pub surface_rule: Value,
     /// `spawn_target`: where the world spawn is searched (empty outside of the overworld)
     pub spawn_target: Vec<ParameterPoint>,
 }
@@ -152,6 +159,7 @@ impl GeneratorSettings {
             default_block: v["default_block"].clone(),
             default_fluid: v["default_fluid"].clone(),
             router: v["noise_router"].clone(),
+            surface_rule: v["surface_rule"].clone(),
             spawn_target: match v.get("spawn_target").and_then(Value::as_array) {
                 Some(list) => list.iter().map(parse_parameter_point).collect::<Result<Vec<_>>>()?,
                 None => Vec::new(),
@@ -233,6 +241,8 @@ pub struct RandomState {
     pub router: NoiseRouter,
     /// `RandomState.sampler`: the climate functions without caches or holders, used by the biome source and the spawn search
     pub sampler: Sampler,
+    noise_params: HashMap<String, NoiseParams>,
+    noise_cache: Mutex<HashMap<String, Arc<NormalNoise>>>,
 }
 
 /// The visitor `RandomState` maps the climate functions with: references and markers are replaced by the function they wrap.
@@ -304,6 +314,22 @@ impl Visitor for Wiring<'_> {
 }
 
 impl RandomState {
+    /// `RandomState.getOrCreateNoise`
+    pub fn get_or_create_noise(&self, key: &str) -> Result<Arc<NormalNoise>> {
+        if let Some(n) = self.noise_cache.lock().unwrap().get(key) {
+            return Ok(n.clone());
+        }
+        let p = self.noise_params.get(key).ok_or_else(|| anyhow!("unknown noise {key}"))?;
+        let n = Arc::new(NormalNoise::create(&mut *self.random.from_hash_of(key), p.first_octave, &p.amplitudes));
+        self.noise_cache.lock().unwrap().insert(key.to_owned(), n.clone());
+        Ok(n)
+    }
+
+    /// `RandomState.getOrCreateRandomFactory`
+    pub fn get_or_create_random_factory(&self, name: &str) -> PositionalRandomFactory {
+        self.random.from_hash_of(name).fork_positional()
+    }
+
     pub fn new(data: &WorldgenData, settings: &GeneratorSettings, seed: i64) -> Result<Self> {
         let mut base: Box<dyn RandomSource> =
             if settings.legacy_random_source { Box::new(LegacyRandomSource::new(seed)) } else { Box::new(XoroshiroRandomSource::new(seed)) };
@@ -324,6 +350,6 @@ impl RandomState {
             weirdness: m.map_all(&router.ridges),
             spawn_target: settings.spawn_target.clone(),
         };
-        Ok(Self { seed, random, aquifer_random, ore_random, router, sampler })
+        Ok(Self { seed, random, aquifer_random, ore_random, router, sampler, noise_params: data.noises.clone(), noise_cache: Mutex::new(HashMap::new()) })
     }
 }

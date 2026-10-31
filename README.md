@@ -3,7 +3,7 @@
 A port of the **Minecraft: Java Edition 1.21 / 1.21.1** server (protocol **767**) to Rust. The goal is 1:1 behaviour
 with the vanilla server, so that an unmodified Java 1.21 client can connect and play.
 
-> **Status: milestone 5 of about 12 is under way (world generation: the terrain shape and the biome source are done, surface / carvers / features / structures are not) (see [docs/ROADMAP.md](docs/ROADMAP.md)).** This is a foundation, not a complete port.
+> **Status: milestone 5 of about 12 is under way (world generation: the terrain shape, the biome source and the surface rules are done; carvers / features / structures are not) (see [docs/ROADMAP.md](docs/ROADMAP.md)).** This is a foundation, not a complete port.
 > Vanilla is ~4,000 classes and ~470,000 lines of code; this document states exactly what works and has been verified,
 > and what is still missing. It has not been tested with a real Minecraft client (none is available in the build
 > environment); it has been tested against Mojang's own decoders and in a differential test against the real vanilla
@@ -23,6 +23,7 @@ with the vanilla server, so that an unmodified Java 1.21 client can connect and 
 | **Light engine** (block + sky light, section storage rules, face-shape occlusion) and real heightmaps for generated / edited chunks | ✅ identical to the vanilla server on every stored layer of a vanilla-generated world (see below); incremental `light_update` packets after edits: not yet |
 | **Terrain shape** (`crates/mc-worldgen`): random sources, all noise functions, the data-driven density function graph with splines, the wired `NoiseRouter`, `NoiseChunk` (cell interpolation, caches), the aquifer (water / lava lakes) and ore veins, for every vanilla noise setting (overworld, amplified, large biomes, nether, end, caves, floating islands) | ✅ bit-identical to the Mojang classes: 878 random / noise values, 5,760 router values, 34 generated chunks; **not wired into the server yet** (no surface blocks, carvers, features or structures, so it would look like bare stone) |
 | **Biome source** (`crates/mc-worldgen`): `Climate` (quantized parameters, the parameter-space R-tree with its thread-local shortcut, the sampler, the world spawn search), the overworld parameter table (`OverworldBiomeBuilder`, 7,593 entries), the nether preset and the End island biomes | ✅ identical to the Mojang classes: all list entries, 160,000 R-tree searches including exact ties, 79,300 biomes sampled from 13 seeds / settings, 9 spawn searches; not wired into the server yet |
+| **Surface stage** (`crates/mc-worldgen`): `SurfaceSystem` and `SurfaceRules` compiled from the `surface_rule` JSON (all 11 conditions, bandlands, bedrock floor / roof, noise thresholds), clay bands, eroded badlands pillars, frozen-ocean icebergs, the `BiomeManager` zoom (SHA-256 seed, fiddled distances), the biome temperature (`PerlinSimplexNoise`, frozen modifier), the `WORLD_SURFACE_WG` heightmap | ✅ identical to the Mojang classes: 223 chunks (the first chunk of each of 63 biomes, 9 noise settings / seeds incl. nether and End), every block and the heightmap; not wired into the server yet |
 | Block placement uses the real item→block mapping, replaceable blocks, and the real collision shapes against player hitboxes | ✅ (default block state only until `getStateForPlacement`, M7) |
 | **Worlds on disk**: Anvil regions (`.mca`, zlib/gzip/LZ4/uncompressed, external `.mcc`), `level.dat`, `playerdata/*.dat` (position, game mode, health, food, XP, inventory), stored heightmaps/light/block entities, `level-name`/`level-seed`, autosave, graceful save on Ctrl+C/SIGTERM | ✅ loads worlds of the vanilla server and writes worlds the vanilla server loads (see below) |
 | `server.properties` (same keys and defaults as vanilla) | ✅ read/write |
@@ -74,6 +75,7 @@ Mojang's servers onto the user's machine. Running the original server requires a
 | `tools/vanilla_compare.sh` | Differential test against the real vanilla server (requires `MC_EULA_ACCEPTED=true`). |
 | `tools/world_compare.sh`, `tools/world_compare.py` | World persistence test: vanilla generates a world, both servers load it and their chunk packets are compared; then the Rust server edits and saves the world and vanilla loads it (requires `MC_EULA_ACCEPTED=true`). |
 | `tools/remap.sh` | Produces `server-named.jar`, the vanilla server with Mojang's official names (shared by the tools below). |
+| `tools/verify_surface.sh` | Runs the real surface stage (`tools/terrain/.../SurfaceRef.java`, 9 settings, 223 chunks) and compares blocks and heightmaps with the Rust port. |
 | `tools/verify_terrain.sh` | Runs the real `NoiseChunk` fill loop (`tools/terrain/.../TerrainRef.java`), the real noise router (`RouterRef.java`) and the real biome sources (`BiomeRef.java`) for 9 / 13 configurations and compares the Rust port block by block / value by value. |
 | `tools/verify_noise.sh` | Runs the real random sources and noise functions (`tools/noise/NoiseRef.java`) and compares them bit for bit with `crates/mc-worldgen`. |
 | `tools/light_check.sh` | Recomputes the light of every chunk of a vanilla-generated world and compares it with the light vanilla stored (also `mc-server --check-light`). |
@@ -151,7 +153,7 @@ that spills in from chunks that only vanilla generates. Those belong to mileston
 
 `tools/verify_terrain.sh` also runs `tools/terrain/.../BiomeRef.java` with the **real** `Climate`, `MultiNoiseBiomeSource`,
 `MultiNoiseBiomeSourceParameterList` and `TheEndBiomeSource`, and `crates/mc-worldgen/tests/biome_parity.rs` compares the Rust port
-(**246,907 values, all identical**):
+(**272,507 values, all identical**):
 
 * the complete overworld (7,593 entries) and nether parameter lists, entry by entry, including the order that decides ties,
 * 160,000 R-tree searches. The biome tables almost never produce a tie between different biomes, so besides the real lists the test
@@ -159,7 +161,9 @@ that spills in from chunks that only vanilla generates. Those belong to mileston
   about 19,700 of them end on an exact tie where the tree and a brute-force search disagree, and the Rust tree gives the vanilla answer every time,
 * the climate target (six quantized values) and the biome at 79,300 quart positions for 13 seeds / settings (overworld, amplified,
   large biomes, caves, floating islands, nether, End): 63 different biomes are hit,
-* `findSpawnPosition` for the 9 overworld-type settings.
+* `findSpawnPosition` for the 9 overworld-type settings,
+* the temperature of every biome (`getTemperature`, incl. the frozen modifier and the height adjustment with `PerlinSimplexNoise`) as raw float
+  bits at 400 positions each (64 biomes), plus `coldEnoughToSnow` / `shouldMeltFrozenOceanIcebergSlightly` on top of it.
 
 The mutation checks show the test is sensitive: ignoring the thread-local "last result", taking the last instead of the first cheapest
 split dimension, changing the sort of the buckets / of the small nodes, dropping the last sort tie-break, rounding instead of truncating
@@ -169,6 +173,27 @@ search (equivalent, a recursive search only returns a different leaf when it is 
 Vanilla details reproduced: `quantizeCoord` truncates the *float* product (`-0.78F * 10000F` is `-7799.9995`, so the boundary is
 `-7799`); the R-tree keeps the previous result of the thread on exact ties (so the answer depends on the search history, as in the
 vanilla server); the End biome is derived from the erosion function evaluated at the centre of the 16x16 section.
+
+## Surface stage test (milestone 5, part 4)
+
+`tools/verify_surface.sh` runs the **real** surface stage (`tools/terrain/.../SurfaceRef.java`): `BiomeSource` for the 3x3 chunks around the target,
+the `NoiseChunk` fill loop, `BiomeManager` (the zoom with the SHA-256 obfuscated seed) and `SurfaceSystem.buildSurface` with the `surface_rule` of
+the noise settings. For each of 9 settings / seeds (overworld x2, amplified, large biomes, nether x2, End, caves, floating islands) it picks the first
+chunk found for every biome in a spiral around the origin (223 chunks, 63 different biomes at the chunk centres) and writes every block and the
+`WORLD_SURFACE_WG` heightmap. `crates/mc-worldgen/tests/surface_parity.rs` replays the same biome scan (so the R-tree search history is identical),
+generates the chunks with the Rust port and compares: **all 223 chunks are identical** (43 different block types occur: grass, sand, red sand,
+terracotta bands, snow, packed ice, gravel, mud, netherrack, soul sand, bedrock floor / roof, ...).
+
+Mutation checks (not committed): changing the surface depth factor, the clay band offset or spacing, the steepness threshold, the eroded badlands
+pillar height, the iceberg height or water chance, the preliminary-surface margin, the heightmap update rule, the `not` condition, the secondary
+depth truncation, the stone depth below, the biome zoom fiddle or the frozen temperature modifier all fail the test (1 to 109 of the 223 chunks
+differ). A shift of the snow temperature threshold by 0.01 is **not** seen by the chunks (no sampled column lands in that band), which is why the
+biome test above compares the temperatures themselves.
+
+Vanilla details reproduced: `ChunkAccess.getHeight` is the first free y minus one (the surface loop starts one above the highest block); the biome
+of a column is looked up at the height of the heightmap (y = 0 for legacy random sources); the biome of a block is the nearest of eight fiddled
+quart corners (`BiomeManager`), clamped to the chunk's quart range; `Math.round` for the clay bands; `WorldGenerationContext` takes the smaller of
+the level height and the generator height (so the nether roof is at 127 in a 256 tall dimension).
 
 ## Terrain shape test (milestone 5, part 2)
 

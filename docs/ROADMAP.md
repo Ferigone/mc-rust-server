@@ -55,7 +55,8 @@ with their stages: full default component maps (M8), tool speeds and survival mi
 classes: random number generators and noises (`tools/verify_noise.sh`, 878 values); the density function graph, the wired
 `NoiseRouter`, `NoiseChunk` with cell interpolation, the aquifer and ore veins, i.e. the terrain shape of every vanilla noise setting
 (`tools/verify_terrain.sh`: 5,760 router values, 34 chunks); the biome sources (`Climate` with the R-tree, `OverworldBiomeBuilder`, nether
-preset, End, world spawn search; 246,907 values). Still to do: `Beardifier` / terrain adaptation to structures, surface rules (`SurfaceSystem`), carvers, features / placed
+preset, End, world spawn search, biome temperatures; 272,507 values); the surface stage (`SurfaceSystem` / `SurfaceRules`, `BiomeManager` zoom, biome temperature;
+`tools/verify_surface.sh`: 223 chunks). Still to do: `Beardifier` / terrain adaptation to structures, carvers, features / placed
 features, structures, and wiring the generator into the server (chunks missing from the region files, new worlds, other dimensions).
 Verification: the same seed → the same blocks as the real generator in a Java harness, chunk by chunk, stage by stage.
 

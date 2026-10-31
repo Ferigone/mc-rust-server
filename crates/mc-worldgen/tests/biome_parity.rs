@@ -194,6 +194,30 @@ fn biome_source_matches_the_real_one() {
             }
         }
     }
+    // E: the temperature of every biome at many positions (bit-exact), and the two thresholds built on it
+    let mut names: Vec<&String> = data.biomes.keys().collect();
+    names.sort();
+    let ys = [-60, 40, 63, 80, 81, 90, 120, 200, 319];
+    let (mut snow, mut melt) = (0usize, 0usize);
+    for name in &names {
+        let climate = &data.biomes[*name];
+        for i in 0..400i32 {
+            let x = (i * 7919 + i * i * 31) % 20001 - 10000;
+            let z = (i * 104729 + i * i * 17) % 20001 - 10000;
+            let y = ys[(i as usize) % ys.len()];
+            let t = climate.temperature_at(x, y, z);
+            let actual = format!("{},{},{}", t.to_bits() as i32, climate.cold_enough_to_snow(x, y, z), climate.should_melt_frozen_ocean_iceberg_slightly(x, y, z));
+            snow += climate.cold_enough_to_snow(x, y, z) as usize;
+            melt += climate.should_melt_frozen_ocean_iceberg_slightly(x, y, z) as usize;
+            compared += 1;
+            let key = format!("clim.{name}.{i}");
+            if reference[key.as_str()] != actual {
+                bad.push(format!("{key} at ({x},{y},{z}): vanilla {} Rust {actual}", reference[key.as_str()]));
+            }
+        }
+    }
+    eprintln!("biome temperatures: {} biomes x 400 positions identical ({snow} cold enough to snow, {melt} warm enough to melt icebergs)", names.len());
+    assert!(snow > 1000 && melt > 1000, "the positions should straddle both thresholds");
     eprintln!("{} different biomes were sampled", seen.len());
     assert!(seen.len() >= 40, "the sampled positions should cover many biomes, got {}", seen.len());
     assert!(bad.is_empty(), "{} of {compared} biome values differ, first ones:\n{}", bad.len(), bad.iter().take(10).cloned().collect::<Vec<_>>().join("\n"));

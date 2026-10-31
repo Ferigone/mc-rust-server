@@ -3,7 +3,7 @@
 A port of the **Minecraft: Java Edition 1.21 / 1.21.1** server (protocol **767**) to Rust. The goal is 1:1 behaviour
 with the vanilla server, so that an unmodified Java 1.21 client can connect and play.
 
-> **Status: milestone 4 of about 12 (see [docs/ROADMAP.md](docs/ROADMAP.md)).** This is a foundation, not a complete port.
+> **Status: milestone 5 of about 12 is under way (world generation: random sources and noise are done) (see [docs/ROADMAP.md](docs/ROADMAP.md)).** This is a foundation, not a complete port.
 > Vanilla is ~4,000 classes and ~470,000 lines of code; this document states exactly what works and has been verified,
 > and what is still missing. It has not been tested with a real Minecraft client (none is available in the build
 > environment); it has been tested against Mojang's own decoders and in a differential test against the real vanilla
@@ -21,6 +21,7 @@ with the vanilla server, so that an unmodified Java 1.21 client can connect and 
 | Keep-alive, chat (unsigned), `/list`, visibility and movement of other players (`ServerEntity.sendChanges`) | ✅ |
 | Block breaking/placing (simplified), 20 TPS | ⚠️ simplified |
 | **Light engine** (block + sky light, section storage rules, face-shape occlusion) and real heightmaps for generated / edited chunks | ✅ identical to the vanilla server on every stored layer of a vanilla-generated world (see below); incremental `light_update` packets after edits: not yet |
+| **World generation primitives** (`crates/mc-worldgen`): `LegacyRandomSource`, `XoroshiroRandomSource`, positional factories, `ImprovedNoise`, `PerlinNoise`, `NormalNoise`, `SimplexNoise`, `BlendedNoise` | ✅ bit-identical to the Mojang classes (878 values); the terrain generator itself is not wired up yet |
 | Block placement uses the real item→block mapping, replaceable blocks, and the real collision shapes against player hitboxes | ✅ (default block state only until `getStateForPlacement`, M7) |
 | **Worlds on disk**: Anvil regions (`.mca`, zlib/gzip/LZ4/uncompressed, external `.mcc`), `level.dat`, `playerdata/*.dat` (position, game mode, health, food, XP, inventory), stored heightmaps/light/block entities, `level-name`/`level-seed`, autosave, graceful save on Ctrl+C/SIGTERM | ✅ loads worlds of the vanilla server and writes worlds the vanilla server loads (see below) |
 | `server.properties` (same keys and defaults as vanilla) | ✅ read/write |
@@ -72,6 +73,7 @@ Mojang's servers onto the user's machine. Running the original server requires a
 | `tools/vanilla_compare.sh` | Differential test against the real vanilla server (requires `MC_EULA_ACCEPTED=true`). |
 | `tools/world_compare.sh`, `tools/world_compare.py` | World persistence test: vanilla generates a world, both servers load it and their chunk packets are compared; then the Rust server edits and saves the world and vanilla loads it (requires `MC_EULA_ACCEPTED=true`). |
 | `tools/remap.sh` | Produces `server-named.jar`, the vanilla server with Mojang's official names (shared by the tools below). |
+| `tools/verify_noise.sh` | Runs the real random sources and noise functions (`tools/noise/NoiseRef.java`) and compares them bit for bit with `crates/mc-worldgen`. |
 | `tools/light_check.sh` | Recomputes the light of every chunk of a vanilla-generated world and compares it with the light vanilla stored (also `mc-server --check-light`). |
 | `tools/dump_props.sh` | Runs the **real** block and item classes and dumps per-state facts (hardness, blast resistance, light emission / opacity, collision / outline / occlusion shapes, 18 flags such as `isAir`, "holds a fluid", replaceable) and per-item facts (stack size, durability, placed block) into `reference/gen/generated/reports/{block_props,item_props}.tsv`. Run by `tools/fetch_reference.sh`. |
 | `tools/cmp_dumps.py`, `tools/cmp_chunk.py` | Compare packet dumps / take a chunk apart piece by piece. |
@@ -142,6 +144,14 @@ player attributes and the world border constant.
 Run against an older world (generated, then left running for a while), the remaining differences are all changes the vanilla
 server makes by itself after loading: scheduled block/fluid ticks (leaf decay distance, flowing water and lava) and light
 that spills in from chunks that only vanilla generates. Those belong to milestones M4/M5/M7.
+
+## World generation primitives test (milestone 5, part 1)
+
+`tools/verify_noise.sh` runs a fixed call sequence through the **real** Mojang `LegacyRandomSource`, `XoroshiroRandomSource` (with
+`fork`, positional factories, `fromHashOf`, gaussian, reseeding), `ImprovedNoise` (value, scaled variant, derivative), `PerlinNoise`
+(modern and legacy initialisation), `NormalNoise` (modern and legacy nether), `SimplexNoise` (2D and 3D) and `BlendedNoise` for several
+seeds and 8 sample points, and `crates/mc-worldgen/tests/noise_parity.rs` replays it with the Rust port: **all 878 values are
+bit-identical** (the test fails with 521 differences if a single float constant is widened wrongly, e.g. Java's `1.110223E-16F`).
 
 ## Light engine test (milestone 4)
 

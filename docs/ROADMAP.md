@@ -51,11 +51,12 @@ with their stages: full default component maps (M8), tool speeds and survival mi
 **M4 ✅ Light engine** (block and sky light, heightmap types; `tools/light_check.sh`). Still open from this stage: incremental updates and `light_update` packets after block edits, `propagateFromEmptySections` (floating islands), multithreaded lighting. Port of `world/level/lighting` (sky/block light BFS, `DataLayer`), full heightmaps
 (`MOTION_BLOCKING`, `OCEAN_FLOOR`, …) instead of the simplified ones. Replaces the simplified sky light.
 
-**M5 — World generation** (the biggest seed-parity risk). Random number generators (`LegacyRandomSource`,
-`XoroshiroRandomSource`), noises (`ImprovedNoise`, `PerlinNoise`, `SimplexNoise`, `BlendedNoise`), the density function
-graph interpreter and `NoiseRouter` (JSON data), the multi-noise biome source, surface rules, carvers, features/placed
-features, structures. Verification: the same seed → the same blocks as the real `NoiseBasedChunkGenerator` in a Java
-harness, chunk by chunk.
+**M5 — World generation** (the biggest seed-parity risk). Done so far: random number generators (`LegacyRandomSource`,
+`XoroshiroRandomSource`, positional factories) and noises (`ImprovedNoise`, `PerlinNoise`, `NormalNoise`, `SimplexNoise`,
+`BlendedNoise`) in `crates/mc-worldgen`, bit-identical to the Mojang classes (`tools/verify_noise.sh`, 878 values). Still to do: the
+density function graph interpreter and `NoiseRouter` (JSON data), the multi-noise biome source, surface rules, carvers,
+features / placed features, structures. Verification: the same seed → the same blocks as the real `NoiseBasedChunkGenerator` in a
+Java harness, chunk by chunk.
 
 **M6 — Entities and physics.** `Entity`/`LivingEntity`/`Player`, AABB and `VoxelShape` (collisions), movement validation
 (`ServerGamePacketListenerImpl.handleMovePlayer`: "moved too quickly/wrongly"), attributes, effects, damage,

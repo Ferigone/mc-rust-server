@@ -1,0 +1,8 @@
+# Railway: build the Dockerfile, restart on failure. Minecraft is plain TCP: add a TCP proxy in the service's Networking settings (docs/DEPLOY.md).
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10

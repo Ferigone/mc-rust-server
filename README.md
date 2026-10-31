@@ -30,6 +30,11 @@ with the vanilla server, so that an unmodified Java 1.21 client can connect and 
 | **Worlds on disk**: Anvil regions (`.mca`, zlib/gzip/LZ4/uncompressed, external `.mcc`), `level.dat`, `playerdata/*.dat` (position, game mode, health, food, XP, inventory), stored heightmaps/light/block entities, `level-name`/`level-seed`, autosave, graceful save on Ctrl+C/SIGTERM | ✅ loads worlds of the vanilla server and writes worlds the vanilla server loads (see below) |
 | `server.properties` (same keys and defaults as vanilla) | ✅ read/write |
 
+## Running it
+
+* Locally: `tools/fetch_reference.sh` (downloads the official server from Mojang and runs its data generator into the git-ignored `reference/`), then `cargo run --release -p mc-server`.
+* In a container / on Railway: see [docs/DEPLOY.md](docs/DEPLOY.md) (`Dockerfile`, `railway.toml`).
+
 ## What is still missing (honestly)
 
 The last stages of normal world generation: features (trees, ores, flowers, lakes, ...), structures (villages, strongholds, ...)

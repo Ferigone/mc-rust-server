@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Rozbiera pakiet level_chunk_with_light na części i porównuje vanilla vs Rust dla wspólnych chunków."""
+"""Takes a level_chunk_with_light packet apart and compares vanilla vs Rust for common chunks."""
 import struct, sys
 exec(open("tools/cmp_dumps.py").read().split("a, b = load")[0])
 
@@ -56,10 +56,10 @@ if __name__ == "__main__":
     cv, cr = chunks(v), chunks(r_)
     common = sorted(set(cv) & set(cr))
     k = common[0] if common else None
-    print("wspólne chunki:", len(common), "przykład:", k)
+    print("common chunks:", len(common), "example:", k)
     a, b = cv[k], cr[k]
-    print("heightmap NBT:", "IDENTYCZNY" if a["hm"] == b["hm"] else f"RÓŻNY vanilla={a['hm'].hex()[:60]}.. rust={b['hm'].hex()[:60]}..")
-    print("sekcje (bajty):", "IDENTYCZNE" if a["sec"] == b["sec"] else f"RÓŻNE vanilla={len(a['sec'])}B rust={len(b['sec'])}B")
+    print("heightmap NBT:", "IDENTICAL" if a["hm"] == b["hm"] else f"DIFFERENT vanilla={a['hm'].hex()[:60]}.. rust={b['hm'].hex()[:60]}..")
+    print("sections (bytes):", "IDENTICAL" if a["sec"] == b["sec"] else f"DIFFERENT vanilla={len(a['sec'])}B rust={len(b['sec'])}B")
     print("block entities:", a["be"], b["be"])
     for nme, i in (("sky_mask", 0), ("block_mask", 1), ("empty_sky_mask", 2), ("empty_block_mask", 3)):
         print(f"  {nme}: vanilla={bits(a['masks'][i])} rust={bits(b['masks'][i])}")
@@ -71,4 +71,4 @@ if __name__ == "__main__":
         x, y = cv[key], cr[key]
         stats["hm"] += x["hm"] == y["hm"]; stats["sec"] += x["sec"] == y["sec"]
         stats["masks"] += x["masks"] == y["masks"]; stats["sky"] += x["sky"] == y["sky"] and x["blk"] == y["blk"]
-    print("identyczne we wszystkich wspólnych chunkach:", stats, "z", len(common))
+    print("identical in all common chunks:", stats, "of", len(common))

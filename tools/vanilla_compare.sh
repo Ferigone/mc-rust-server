@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# Test różnicowy: uruchamia PRAWDZIWY serwer vanilla 1.21.1 obok serwera Rust i porównuje pakiety dla tych samych zdarzeń.
+# Differential test: runs the REAL vanilla 1.21.1 server next to the Rust server and compares packets for the same events.
 #
-# WYMAGA zgody na EULA Mojang (https://aka.ms/MinecraftEULA). Skrypt zapisze eula=true w katalogu roboczym
-# TYLKO gdy ustawisz MC_EULA_ACCEPTED=true, czyli świadomie potwierdzisz, że akceptujesz EULA.
+# REQUIRES acceptance of the Mojang EULA (https://aka.ms/MinecraftEULA). The script writes eula=true into the working directory
+# ONLY when you set MC_EULA_ACCEPTED=true, i.e. you knowingly confirm that you accept the EULA.
 #   MC_EULA_ACCEPTED=true tools/vanilla_compare.sh
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 if [ "${MC_EULA_ACCEPTED:-}" != "true" ]; then
-  echo "Ten test uruchamia serwer vanilla, co wymaga zaakceptowania EULA Mojang." >&2
-  echo "Przeczytaj https://aka.ms/MinecraftEULA i, jeśli się zgadzasz, uruchom: MC_EULA_ACCEPTED=true $0" >&2
+  echo "This test runs the vanilla server, which requires accepting the Mojang EULA." >&2
+  echo "Read https://aka.ms/MinecraftEULA and, if you agree, run: MC_EULA_ACCEPTED=true $0" >&2
   exit 2
 fi
 [ -f reference/dl/server.jar ] || tools/fetch_reference.sh
@@ -34,7 +34,7 @@ force-gamemode=true'
 trap 'kill $VPID $RPID 2>/dev/null || true' EXIT
 for _ in $(seq 1 240); do grep -q 'Done (' "$W/vanilla/server.out" 2>/dev/null && break; sleep 0.5; done
 if ! grep -q 'Done (' "$W/vanilla/server.out" 2>/dev/null; then
-  echo "Serwer vanilla nie wystartował (zajęty port $VP / blokada świata?). Ostatnie linie:" >&2; tail -5 "$W/vanilla/server.out" >&2; exit 3
+  echo "The vanilla server did not start (port $VP in use / world lock?). Last lines:" >&2; tail -5 "$W/vanilla/server.out" >&2; exit 3
 fi
 for _ in $(seq 1 40); do (echo > "/dev/tcp/127.0.0.1/$RP") 2>/dev/null && break; sleep 0.25; done
 P="$ROOT/target/release/mc-probe"; D="$W/dumps"

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Porównuje dwa zrzuty pakietów clientbound z mc-probe (--dump): serwer vanilla vs serwer Rust.
+"""Compares two clientbound packet dumps from mc-probe (--dump): the vanilla server vs the Rust server.
 
 Zrzut: [stan u8][len u32 BE][VarInt id + body]; stany: 0 login, 1 config, 2 play.
-Użycie: cmp_dumps.py vanilla.bin rust.bin [--show NAZWA ...] [--hex]
+Usage: cmp_dumps.py vanilla.bin rust.bin [--show NAME ...] [--hex]
 """
 import re, struct, sys, collections
 
@@ -21,7 +21,7 @@ def load(path):
         pid, j = varint(p); out.append((st, pid, p[j:]))
     return out
 
-# nazwy z wygenerowanego ids.rs
+# names from the generated ids.rs
 names = {}
 cur = None
 for line in open("crates/mc-protocol/src/ids.rs"):
@@ -44,16 +44,16 @@ def summarize(p):
     return c
 ca, cb = summarize(a), summarize(b)
 
-print(f"{'stan/pakiet':45} {'vanilla':>8} {'rust':>6}  bajty identyczne?")
+print(f"{'state/packet':45} {'vanilla':>8} {'rust':>6}  identical bytes?")
 for key in list(ca.keys()) + [k for k in cb if k not in ca]:
     la, lb = ca.get(key, []), cb.get(key, [])
     same = ""
     if la and lb:
         same = "TAK (wszystkie)" if la == lb else ("pierwszy TAK" if la[0] == lb[0] else "NIE")
-    mark = "  <-- brak w vanilla" if not la else ("  <-- brak w Rust" if not lb else "")
+    mark = "  <-- missing in vanilla" if not la else ("  <-- missing in Rust" if not lb else "")
     print(f"{STATE[key[0]]+'/'+key[1]:45} {len(la):8} {len(lb):6}  {same}{mark}")
 
-print("\nKOLEJNOŚĆ (pierwsze wystąpienia, bez chunków):")
+print("\nORDER (first occurrences, without chunks):")
 def order(p):
     seen = []; 
     for st, pid, _ in p:

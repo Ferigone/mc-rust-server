@@ -1,6 +1,6 @@
 //! Warstwa sieciowa: listener, handshake, status, login (offline + online), configuration.
-//! Po `finish_configuration` połączenie przechodzi w tryb `play`: czytnik dekoduje pakiety
-//! i przekazuje je do wątku gry; osobne zadanie zapisu wysyła gotowe ramki.
+//! After `finish_configuration` the connection switches to `play`: the reader decodes packets
+//! and forwards them to the game thread; a separate writer task sends ready-made frames.
 
 use crate::auth;
 use crate::config::Settings;
@@ -23,15 +23,15 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 pub const VERSION_NAME: &str = "1.21.1";
-/// Port nie weryfikuje jeszcze podpisanych wiadomości, więc nie ogłasza wymuszania bezpiecznego czatu
-/// (odstępstwo od domyślnego `enforce-secure-profile=true` — patrz README).
+/// The port does not verify signed messages yet, so it does not announce secure chat enforcement
+/// (a deviation from the default `enforce-secure-profile=true`, see the README).
 pub const ENFORCES_SECURE_CHAT: bool = false;
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Co wysyłamy do zadania zapisu gracza.
+/// What is sent to a player's writer task.
 pub enum Out {
     Frame(Arc<Vec<u8>>),
-    /// Wyślij ramkę (opcjonalną) i zamknij połączenie.
+    /// Send an (optional) frame and close the connection.
     Close(Option<Arc<Vec<u8>>>),
 }
 
@@ -65,7 +65,7 @@ pub enum GameEvent {
     Shutdown,
 }
 
-/// Dane statusu aktualizowane przez wątek gry.
+/// Status data updated by the game thread.
 #[derive(Default)]
 pub struct StatusInfo {
     pub sample: Vec<(String, uuid::Uuid)>,
@@ -85,13 +85,13 @@ pub struct Shared {
 pub async fn serve(shared: Arc<Shared>) -> Result<()> {
     let ip = if shared.settings.ip.is_empty() { "0.0.0.0" } else { &shared.settings.ip };
     let listener = TcpListener::bind((ip, shared.settings.port)).await?;
-    info!("Nasłuchuję na {}:{}", ip, shared.settings.port);
+    info!("Listening on {}:{}", ip, shared.settings.port);
     loop {
         let (stream, addr) = listener.accept().await?;
         let shared = shared.clone();
         tokio::spawn(async move {
             if let Err(e) = handle(stream, addr, shared).await {
-                debug!("{addr}: połączenie zakończone: {e}");
+                debug!("{addr}: connection ended: {e}");
             }
         });
     }
@@ -139,7 +139,7 @@ async fn handle(stream: TcpStream, addr: SocketAddr, shared: Arc<Shared>) -> Res
 
     let (id, body) = c.read_packet_timeout().await?;
     if id != ids::handshake::serverbound::INTENTION {
-        bail!("pierwszy pakiet nie jest handshake: {id}");
+        bail!("the first packet is not a handshake: {id}");
     }
     let intent = Intention::decode(&mut Reader::new(&body))?;
     match intent.next_state {
@@ -152,13 +152,13 @@ async fn handle(stream: TcpStream, addr: SocketAddr, shared: Arc<Shared>) -> Res
         2 | 3 => {
             let transfer = intent.next_state == 3;
             if transfer {
-                // accepts-transfers=false (domyślnie)
+                // accepts-transfers=false (the default)
                 let reason = Text::translatable("multiplayer.disconnect.transfers_disabled");
                 c.send(&packets::login_disconnect(&reason)).await?;
                 return Ok(());
             }
             if intent.protocol_version != ids::PROTOCOL_VERSION {
-                // dokładnie jak ServerHandshakePacketListenerImpl.beginLogin
+                // exactly like ServerHandshakePacketListenerImpl.beginLogin
                 let key = if intent.protocol_version < 754 { "multiplayer.disconnect.outdated_client" } else { "multiplayer.disconnect.incompatible" };
                 let reason = Text::translatable(key).with_args(vec![Text::plain(VERSION_NAME)]);
                 c.send(&packets::login_disconnect(&reason)).await?;
@@ -166,13 +166,13 @@ async fn handle(stream: TcpStream, addr: SocketAddr, shared: Arc<Shared>) -> Res
             }
             login_and_play(c, addr, shared).await
         }
-        n => bail!("nieprawidłowy next_state {n}"),
+        n => bail!("invalid next_state {n}"),
     }
 }
 
 // ------------------------------------------------------------------- status
 
-/// Kolejność kluczy zmierzona na prawdziwym serwerze 1.21.1: version, favicon, description, players.
+/// Key order measured on the real 1.21.1 server: version, favicon, description, players.
 fn status_json(shared: &Shared) -> String {
     use serde_json::{json, Map, Value};
     let s = &shared.settings;
@@ -193,8 +193,8 @@ fn status_json(shared: &Shared) -> String {
         }
     }
     m.insert("players".into(), Value::Object(players));
-    // `enforcesSecureChat` ma wartość domyślną false i jest pomijane przy false (kodek vanilla);
-    // ten port nie wymusza bezpiecznego czatu, więc go nie ogłasza.
+    // `enforcesSecureChat` defaults to false and is omitted when false (vanilla codec);
+    // this port does not enforce secure chat, so it does not announce it.
     if ENFORCES_SECURE_CHAT {
         m.insert("enforcesSecureChat".into(), Value::Bool(true));
     }
@@ -208,7 +208,7 @@ async fn status(c: &mut Conn, shared: &Shared) -> Result<()> {
         match id {
             ids::status::serverbound::STATUS_REQUEST => {
                 if requested {
-                    bail!("podwójne żądanie statusu");
+                    bail!("duplicate status request");
                 }
                 requested = true;
                 c.send(&packets::status_response(&status_json(shared))).await?;
@@ -218,7 +218,7 @@ async fn status(c: &mut Conn, shared: &Shared) -> Result<()> {
                 c.send(&packets::pong_response(t)).await?;
                 return Ok(());
             }
-            other => bail!("nieoczekiwany pakiet statusu {other}"),
+            other => bail!("unexpected status packet {other}"),
         }
     }
 }
@@ -236,7 +236,7 @@ async fn login_and_play(mut c: Conn, addr: SocketAddr, shared: Arc<Shared>) -> R
     }
     let hello = LoginHello::decode(&mut Reader::new(&body))?;
     if !valid_player_name(&hello.name) {
-        bail!("nieprawidłowy nick");
+        bail!("invalid player name");
     }
 
     let profile = if shared.settings.online_mode {
@@ -251,9 +251,9 @@ async fn login_and_play(mut c: Conn, addr: SocketAddr, shared: Arc<Shared>) -> R
         let k = LoginKey::decode(&mut Reader::new(&body))?;
         let (secret, ok) = key.decrypt(&k.shared_secret, &k.challenge, &challenge)?;
         if !ok {
-            bail!("Protocol error: zły token weryfikacyjny");
+            bail!("Protocol error: bad verify token");
         }
-        // Od tego momentu strumień jest szyfrowany AES-128-CFB8 w obu kierunkach.
+        // From here on the stream is encrypted with AES-128-CFB8 in both directions.
         c.dec.enable_encryption(&secret);
         c.cipher = Some(Encryptor::new(&secret));
         let hash = auth::server_hash("", &secret, &key.public_der);
@@ -261,26 +261,26 @@ async fn login_and_play(mut c: Conn, addr: SocketAddr, shared: Arc<Shared>) -> R
         let prevent_proxy = None::<std::net::IpAddr>;
         match tokio::task::spawn_blocking(move || auth::has_joined(&name, &hash, prevent_proxy)).await? {
             Ok(Some(p)) => {
-                info!("UUID gracza {} to {}", p.name, p.id);
+                info!("UUID of player {} is {}", p.name, p.id);
                 p
             }
             Ok(None) => {
                 let reason = Text::translatable("multiplayer.disconnect.unverified_username");
                 c.send(&packets::login_disconnect(&reason)).await?;
-                bail!("sesja niepoprawna dla {}", hello.name);
+                bail!("invalid session for {}", hello.name);
             }
             Err(e) => {
-                warn!("Nie udało się zweryfikować sesji: {e}");
+                warn!("Could not verify the session: {e}");
                 let reason = Text::translatable("multiplayer.disconnect.authservers_down");
                 c.send(&packets::login_disconnect(&reason)).await?;
-                bail!("serwery uwierzytelniania niedostępne");
+                bail!("authentication servers unavailable");
             }
         }
     } else {
         GameProfile { id: mc_protocol::buf::offline_uuid(&hello.name), name: hello.name.clone(), properties: vec![] }
     };
 
-    // canPlayerLogin: pełny serwer
+    // canPlayerLogin: server full
     if shared.online.load(Ordering::Relaxed) >= shared.settings.max_players {
         c.send(&packets::login_disconnect(&Text::translatable("multiplayer.disconnect.server_full"))).await?;
         return Ok(());
@@ -306,8 +306,8 @@ async fn login_and_play(mut c: Conn, addr: SocketAddr, shared: Arc<Shared>) -> R
 
 // ------------------------------------------------------------ configuration
 
-/// Faza configuration, kolejność jak `ServerConfigurationPacketListenerImpl.startConfiguration`:
-/// brand -> enabled features -> select_known_packs -> (odpowiedź) registry_data* + update_tags -> finish.
+/// The configuration phase, in the order of `ServerConfigurationPacketListenerImpl.startConfiguration`:
+/// brand -> enabled features -> select_known_packs -> (reply) registry_data* + update_tags -> finish.
 async fn configuration(c: &mut Conn, shared: &Shared) -> Result<ClientInformation> {
     let cfg = &shared.config;
     c.send(&cfg.brand).await?;
@@ -323,10 +323,10 @@ async fn configuration(c: &mut Conn, shared: &Shared) -> Result<ClientInformatio
             sb::CLIENT_INFORMATION => info = ClientInformation::decode(&mut Reader::new(&body))?,
             sb::SELECT_KNOWN_PACKS => {
                 if registries_sent {
-                    bail!("podwójna odpowiedź known packs");
+                    bail!("duplicate known packs reply");
                 }
                 let theirs = packets::decode_known_packs(&mut Reader::new(&body))?;
-                // Jak SynchronizeRegistriesTask.handleResponse: wpisy bez danych tylko przy dokładnie tej samej liście.
+                // Like SynchronizeRegistriesTask.handleResponse: entries without data only when the list is exactly the same.
                 let known: &[KnownPack] = &cfg.known_packs;
                 let use_known = theirs.as_slice() == known;
                 let regs = if use_known { &cfg.registry_known } else { &cfg.registry_full };
@@ -339,12 +339,12 @@ async fn configuration(c: &mut Conn, shared: &Shared) -> Result<ClientInformatio
             }
             sb::FINISH_CONFIGURATION => {
                 if !registries_sent {
-                    bail!("finish_configuration przed synchronizacją rejestrów");
+                    bail!("finish_configuration before registry synchronization");
                 }
                 return Ok(info);
             }
             sb::CUSTOM_PAYLOAD | sb::KEEP_ALIVE | sb::PONG | sb::RESOURCE_PACK | sb::COOKIE_RESPONSE => {}
-            other => bail!("nieoczekiwany pakiet configuration {other}"),
+            other => bail!("unexpected configuration packet {other}"),
         }
     }
 }
@@ -361,7 +361,7 @@ async fn play(c: Conn, addr: SocketAddr, shared: Arc<Shared>, profile: GameProfi
     let closed = Arc::new(tokio::sync::Notify::new());
     let closed_w = closed.clone();
 
-    // Zadanie zapisu: scala dostępne ramki w jeden zapis, szyfruje i wysyła.
+    // Writer task: coalesces the available frames into one write, encrypts and sends.
     let writer = tokio::spawn(async move {
         let mut cipher = cipher;
         let mut out: Vec<u8> = Vec::with_capacity(64 * 1024);
@@ -404,18 +404,18 @@ async fn play(c: Conn, addr: SocketAddr, shared: Arc<Shared>, profile: GameProfi
     shared
         .events
         .send(GameEvent::Join(Box::new(JoinRequest { session, profile, client_info, sender, addr })))
-        .map_err(|_| anyhow!("serwer się zamyka"))?;
+        .map_err(|_| anyhow!("server is shutting down"))?;
 
-    // Czytnik: dekoduje pakiety play i przekazuje do wątku gry.
+    // Reader: decodes play packets and forwards them to the game thread.
     let reason = loop {
         match dec.next_packet() {
             Ok(Some((id, body))) => match decode_serverbound(id, &body) {
                 Ok(packet) => {
                     if shared.events.send(GameEvent::Packet { session, packet }).is_err() {
-                        break "serwer zamknięty".to_string();
+                        break "server closed".to_string();
                     }
                 }
-                Err(e) => break format!("błąd dekodowania pakietu {id:#x}: {e}"),
+                Err(e) => break format!("packet decode error {id:#x}: {e}"),
             },
             Ok(None) => {
                 tokio::select! {
@@ -424,10 +424,10 @@ async fn play(c: Conn, addr: SocketAddr, shared: Arc<Shared>, profile: GameProfi
                         Ok(n) => dec.feed(&buf[..n]),
                         Err(e) => break e.to_string(),
                     },
-                    _ = closed.notified() => break "połączenie zamknięte przez serwer".to_string(),
+                    _ = closed.notified() => break "connection closed by the server".to_string(),
                 }
             }
-            Err(e) => break format!("błąd ramki: {e}"),
+            Err(e) => break format!("frame error: {e}"),
         }
     };
     let _ = shared.events.send(GameEvent::Disconnected { session, reason });

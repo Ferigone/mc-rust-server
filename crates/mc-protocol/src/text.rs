@@ -11,18 +11,18 @@ pub struct Text {
     pub bold: Option<bool>,
     pub italic: Option<bool>,
     pub extra: Vec<Text>,
-    /// Dodatkowe pola stylu (np. clickEvent/hoverEvent/insertion), wyłącznie w kodowaniu NBT.
+    /// Extra style fields (e.g. clickEvent/hoverEvent/insertion), NBT encoding only.
     pub style_nbt: Vec<(String, Tag)>,
-    /// Gotowy tag (np. liczba jako argument `translate`); gdy ustawiony, zastępuje resztę pól.
+    /// A ready-made tag (e.g. a number as a `translate` argument); when set it replaces the other fields.
     pub raw: Option<Tag>,
 }
 
 impl Text {
-    /// `Component.empty()`: pusty literał (nie jest zwijany do napisu tylko gdy ma styl lub dzieci).
+    /// `Component.empty()`: an empty literal (it is only not collapsed to a string when it has style or children).
     pub fn empty() -> Self {
         Self::plain("")
     }
-    /// Liczba całkowita jako argument komponentu tłumaczonego (zapis NBT: `Int`).
+    /// An integer as an argument of a translatable component (NBT encoding: `Int`).
     pub fn int(v: i32) -> Self {
         Self { raw: Some(Tag::Int(v)), ..Default::default() }
     }
@@ -41,7 +41,7 @@ impl Text {
         self
     }
 
-    /// Odpowiednik `Component.tryCollapseToString()`: literał bez stylu i dzieci.
+    /// The equivalent of `Component.tryCollapseToString()`: a literal without style and children.
     fn collapsed(&self) -> Option<&str> {
         if self.raw.is_some() {
             return None;

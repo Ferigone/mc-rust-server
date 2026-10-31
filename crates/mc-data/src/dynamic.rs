@@ -1,15 +1,15 @@
-//! Rejestry dynamiczne synchronizowane z klientem (`RegistryDataLoader.SYNCHRONIZED_REGISTRIES`).
+//! Dynamic registries synchronized with the client (`RegistryDataLoader.SYNCHRONIZED_REGISTRIES`).
 //!
-//! Kolejność wpisów = kolejność ładowania vanilla: `MultiPackResourceManager.listResources` zwraca
-//! `TreeMap<ResourceLocation, ..>` z kluczem będącym pełną ścieżką pliku (z prefiksem i `.json`),
-//! porównywanym najpierw po ścieżce, potem po przestrzeni nazw. To wyznacza ID wpisów
+//! Entry order = vanilla loading order: `MultiPackResourceManager.listResources` returns
+//! a `TreeMap<ResourceLocation, ..>` keyed by the full file path (with prefix and `.json`),
+//! compared by path first, then by namespace. This determines entry IDs
 //! (np. ID biomu w chunkach, ID typu wymiaru w pakiecie Login).
 
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::path::Path;
 
-/// (nazwa rejestru, katalog w datapacku) — w kolejności wysyłania do klienta.
+/// (registry name, data pack directory), in the order they are sent to the client.
 pub const SYNCHRONIZED_REGISTRIES: &[(&str, &str)] = &[
     ("minecraft:worldgen/biome", "worldgen/biome"),
     ("minecraft:chat_type", "chat_type"),
@@ -28,7 +28,7 @@ pub const SYNCHRONIZED_REGISTRIES: &[(&str, &str)] = &[
 pub struct DynamicEntry {
     /// np. `minecraft:plains`
     pub id: String,
-    /// Zawartość JSON z datapacka (pełna, kodek DIRECT).
+    /// JSON content from the data pack (complete, DIRECT codec).
     pub json: Value,
 }
 
@@ -40,8 +40,8 @@ pub struct DynamicRegistry {
 }
 
 impl DynamicRegistry {
-    /// Wartość wysyłana w `registry_data` przy braku dopasowania known packs.
-    /// Biom używa `Biome.NETWORK_CODEC`: tylko ustawienia klimatu i `effects`.
+    /// Value sent in `registry_data` when the known packs do not match.
+    /// Biomes use `Biome.NETWORK_CODEC`: only the climate settings and `effects`.
     pub fn network_json(&self, e: &DynamicEntry) -> Value {
         if self.name == "minecraft:worldgen/biome" {
             let mut m = serde_json::Map::new();
@@ -65,7 +65,7 @@ fn load_one(root: &Path, name: &str, dir: &str) -> Result<DynamicRegistry> {
     let base = root.join(dir);
     let mut files: Vec<(String, std::path::PathBuf)> = Vec::new();
     collect(&base, &base, &mut files)?;
-    // Klucz TreeMap: "<prefiks>/<ścieżka>.json" porównywany jako String Javy (UTF-16, tu: ASCII).
+    // TreeMap key: "<prefix>/<path>.json" compared as a Java String (UTF-16, ASCII here).
     files.sort_by(|a, b| a.0.encode_utf16().cmp(b.0.encode_utf16()));
     let mut entries = Vec::with_capacity(files.len());
     for (rel, path) in files {

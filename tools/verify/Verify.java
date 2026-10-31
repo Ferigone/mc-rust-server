@@ -37,17 +37,17 @@ import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.chunk.LevelChunkSection;
 
 /**
- * Weryfikacja zrzutu pakietów serwera Rust PRAWDZIWYMI dekoderami i kodekami Mojang (z jara serwera 1.21.1):
- *  - każdy pakiet login/configuration/play jest dekodowany oryginalnym kodekiem i musi zużyć cały bufor,
- *  - rejestry są ładowane tak jak robi to klient (RegistryDataLoader.load z sieci),
- *  - kolejność wpisów rejestrów i zawartość tagów porównywane z tym, co policzy prawdziwy serwer vanilla.
+ * Verification of a Rust server packet dump with the REAL Mojang decoders and codecs (from the 1.21.1 server jar):
+ *  - every login/configuration/play packet is decoded with the original codec and must consume the whole buffer,
+ *  - registries are loaded the way the client does it (RegistryDataLoader.load from the network),
+ *  - registry entry order and tag contents are compared with what the real vanilla server computes.
  */
 public class Verify {
     static int ok = 0, fail = 0;
 
     static void check(String name, boolean cond, String detail) {
         if (cond) ok++; else fail++;
-        System.out.println("  [" + (cond ? "OK " : "BŁĄD") + "] " + name + (detail.isEmpty() ? "" : "  " + detail));
+        System.out.println("  [" + (cond ? "OK " : "FAIL") + "] " + name + (detail.isEmpty() ? "" : "  " + detail));
     }
 
     record Rec(int state, byte[] payload) {}
@@ -73,7 +73,7 @@ public class Verify {
         Bootstrap.bootStrap();
         Executor direct = Runnable::run;
 
-        // --- prawdziwe dane vanilla (jak na serwerze)
+        // --- real vanilla data (like on the server)
         MultiPackResourceManager rm = new MultiPackResourceManager(PackType.SERVER_DATA, List.of(ServerPacksSource.createVanillaPackSource()));
         RegistryAccess staticAccess = RegistryAccess.fromRegistryOfRegistries(BuiltInRegistries.REGISTRY);
         LayeredRegistryAccess<RegistryLayer> layered = RegistryLayer.createRegistryAccess();
@@ -86,7 +86,7 @@ public class Verify {
         String file = args[0];
         boolean expectFullData = args.length > 1 && args[1].equals("full");
         List<Rec> recs = read(file);
-        System.out.println("== " + file + ": " + recs.size() + " pakietów");
+        System.out.println("== " + file + ": " + recs.size() + " packets");
 
         // --- login
         ProtocolInfo<?> login = LoginProtocols.CLIENTBOUND;
@@ -107,16 +107,16 @@ public class Verify {
                 check("decode " + (r.state == 0 ? "login" : "config") + " id=" + r.payload[0], false, t.toString());
                 continue;
             }
-            if (buf.isReadable()) check("decode " + p.getClass().getSimpleName() + " zużył cały bufor", false, buf.readableBytes() + " B zostało");
+            if (buf.isReadable()) check("decode " + p.getClass().getSimpleName() + " consumed the whole buffer", false, buf.readableBytes() + " B left");
             if (r.state == 0) loginN++; else configN++;
             if (p instanceof ClientboundRegistryDataPacket rd) regData.put(rd.registry(), rd.entries());
             if (p instanceof ClientboundUpdateTagsPacket t) tagsPacket = t;
         }
-        check("login+config: wszystkie pakiety zdekodowane prawdziwymi kodekami i w pełni zużyte", fail == 0, loginN + " login, " + configN + " config");
+        check("login+config: all packets decoded with the real codecs and fully consumed", fail == 0, loginN + " login, " + configN + " config");
 
-        // --- rejestry jak u klienta
+        // --- registries like on the client
         RegistryAccess.Frozen netAccess = RegistryDataLoader.load(regData, rm, staticAccess, RegistryDataLoader.SYNCHRONIZED_REGISTRIES);
-        check("rejestry: RegistryDataLoader.load (ścieżka klienta) przyjął wszystkie wpisy z serwera Rust", true, regData.size() + " rejestrów");
+        check("registries: RegistryDataLoader.load (the client path) accepted all entries from the Rust server", true, regData.size() + " registries");
         for (var rd : RegistryDataLoader.SYNCHRONIZED_REGISTRIES) {
             ResourceKey key = rd.key();
             Registry serverReg = serverWorldgen.registryOrThrow(key);
@@ -124,16 +124,16 @@ public class Verify {
             List<ResourceLocation> a = new ArrayList<>(), b = new ArrayList<>();
             for (Object k : serverReg.keySet()) a.add((ResourceLocation) k);
             for (Object k : clientReg.keySet()) b.add((ResourceLocation) k);
-            // kolejność ID: porównujemy getId po kluczu
+            // ID order: compare getId by key
             boolean same = a.size() == b.size();
             if (same) for (ResourceLocation rl : a) {
                 Object sv = serverReg.get(rl), cv = clientReg.get(rl);
                 if (sv == null || cv == null || serverReg.getId(sv) != clientReg.getId(cv)) { same = false; break; }
             }
-            check("rejestr " + key.location() + ": liczba wpisów i ID zgodne z serwerem vanilla", same, a.size() + " wpisów");
-            // głębokie porównanie: oba obiekty kodowane z powrotem PRAWDZIWYM kodekiem do JSON muszą być równe
+            check("registry " + key.location() + ": entry count and IDs match the vanilla server", same, a.size() + " entries");
+            // deep comparison: both objects encoded back to JSON with the REAL codec must be equal
             int diffs = 0; String firstDiff = "";
-            // każdy obiekt kodujemy w kontekście SWOJEGO zestawu rejestrów (holdery wskazują na własne rejestry)
+            // every object is encoded in the context of ITS OWN registry set (holders point to their own registries)
             var opsClient = net.minecraft.resources.RegistryOps.create(com.mojang.serialization.JsonOps.INSTANCE, (HolderLookup.Provider) composite0(layered, netAccess));
             var opsServer = net.minecraft.resources.RegistryOps.create(com.mojang.serialization.JsonOps.INSTANCE, (HolderLookup.Provider) layered.compositeAccess());
             com.mojang.serialization.Codec codec = rd.elementCodec();
@@ -144,7 +144,7 @@ public class Verify {
                 com.google.gson.JsonElement cj = (com.google.gson.JsonElement) ((com.mojang.serialization.DataResult) codec.encodeStart(opsClient, cv)).getOrThrow();
                 if (!sj.equals(cj)) { diffs++; if (firstDiff.isEmpty()) firstDiff = rl.toString(); }
             }
-            check("rejestr " + key.location() + ": obiekty z pakietów Rust == obiekty serwera vanilla (kodek→JSON)", diffs == 0, diffs == 0 ? "" : diffs + " różnic, np. " + firstDiff);
+            check("registry " + key.location() + ": objects from the Rust packets == objects of the vanilla server (codec->JSON)", diffs == 0, diffs == 0 ? "" : diffs + " differences, e.g. " + firstDiff);
         }
 
         // --- tagi
@@ -161,7 +161,7 @@ public class Verify {
                 got.put(e.getKey().location().toString(), m);
             }
         }
-        check("tagi: te same rejestry co w vanilla", exp.keySet().equals(got.keySet()), "vanilla=" + exp.keySet().size() + " rust=" + got.keySet().size() + (exp.keySet().equals(got.keySet()) ? "" : " różnica: " + diffKeys(exp.keySet(), got.keySet())));
+        check("tags: the same registries as in vanilla", exp.keySet().equals(got.keySet()), "vanilla=" + exp.keySet().size() + " rust=" + got.keySet().size() + (exp.keySet().equals(got.keySet()) ? "" : " difference: " + diffKeys(exp.keySet(), got.keySet())));
         int tagsTotal = 0, tagsBad = 0;
         for (var e : exp.entrySet()) {
             Map<String, Set<Integer>> g = got.getOrDefault(e.getKey(), Map.of());
@@ -170,12 +170,12 @@ public class Verify {
                 tagsTotal++;
                 if (!t.getValue().equals(g.get(t.getKey()))) {
                     tagsBad++;
-                    if (tagsBad <= 5) System.out.println("      różnica tagu " + e.getKey() + " " + t.getKey() + ": vanilla=" + t.getValue().size() + " rust=" + (g.get(t.getKey()) == null ? "brak" : g.get(t.getKey()).size()));
+                    if (tagsBad <= 5) System.out.println("      tag difference " + e.getKey() + " " + t.getKey() + ": vanilla=" + t.getValue().size() + " rust=" + (g.get(t.getKey()) == null ? "missing" : g.get(t.getKey()).size()));
                 }
             }
-            if (!regOk) check("tagi " + e.getKey() + ": zestaw nazw tagów", false, "vanilla=" + e.getValue().size() + " rust=" + g.size());
+            if (!regOk) check("tagi " + e.getKey() + ": set of tag names", false, "vanilla=" + e.getValue().size() + " rust=" + g.size());
         }
-        check("tagi: zawartość (ID) identyczna z prawdziwym serwerem dla każdego tagu", tagsBad == 0, tagsTotal + " tagów, " + tagsBad + " różnic");
+        check("tags: contents (IDs) identical to the real server for every tag", tagsBad == 0, tagsTotal + " tags, " + tagsBad + " differences");
 
         // --- play
         RegistryAccess.Frozen composite = layered.replaceFrom(RegistryLayer.WORLDGEN, netAccess).compositeAccess();
@@ -189,13 +189,13 @@ public class Verify {
                 p = (Packet<?>) game.codec().decode(buf);
             } catch (Throwable t) {
                 playBad++;
-                System.out.println("      BŁĄD dekodowania play id=" + (r.payload[0] & 0xff) + ": " + t);
+                System.out.println("      play decode FAIL id=" + (r.payload[0] & 0xff) + ": " + t);
                 continue;
             }
             counts.merge(p.getClass().getSimpleName(), 1, Integer::sum);
-            if (buf.isReadable()) { playBad++; System.out.println("      " + p.getClass().getSimpleName() + ": " + buf.readableBytes() + " B niezużytych"); }
+            if (buf.isReadable()) { playBad++; System.out.println("      " + p.getClass().getSimpleName() + ": " + buf.readableBytes() + " B unconsumed"); }
             if (p instanceof ClientboundLoginPacket l) {
-                check("play/login: wymiar = overworld, typ wymiaru rozwiązany przez rejestr klienta", l.commonPlayerSpawnInfo().dimension().location().toString().equals("minecraft:overworld") && l.commonPlayerSpawnInfo().dimensionType().is(net.minecraft.world.level.dimension.BuiltinDimensionTypes.OVERWORLD), "eid=" + l.playerId() + " view=" + l.chunkRadius());
+                check("play/login: dimension = overworld, dimension type resolved through the client registry", l.commonPlayerSpawnInfo().dimension().location().toString().equals("minecraft:overworld") && l.commonPlayerSpawnInfo().dimensionType().is(net.minecraft.world.level.dimension.BuiltinDimensionTypes.OVERWORLD), "eid=" + l.playerId() + " view=" + l.chunkRadius());
             }
             if (p instanceof ClientboundLevelChunkWithLightPacket c) {
                 chunksChecked++;
@@ -211,14 +211,14 @@ public class Verify {
                             check("chunk: blok y=-63/-62 = dirt", sec.getBlockState(3, 1, 5).is(Blocks.DIRT) && sec.getBlockState(3, 2, 5).is(Blocks.DIRT), "");
                             check("chunk: blok y=-61 = grass_block", sec.getBlockState(3, 3, 5).is(Blocks.GRASS_BLOCK), "");
                             check("chunk: blok y=-60 = powietrze", sec.getBlockState(3, 4, 5).isAir(), "");
-                            check("chunk: biom = plains (po ID z rejestru klienta)", sec.getNoiseBiome(1, 1, 1).is(net.minecraft.world.level.biome.Biomes.PLAINS), "");
+                            check("chunk: biome = plains (by ID from the client registry)", sec.getNoiseBiome(1, 1, 1).is(net.minecraft.world.level.biome.Biomes.PLAINS), "");
                         }
                     }
                     if (data.isReadable()) { good = false; }
                     if (!good) { chunkBad++; }
                     var ld = c.getLightData();
                     if (chunksChecked == 1) {
-                        check("chunk: światło — maski i tablice spójne", ld.getSkyYMask().cardinality() == ld.getSkyUpdates().size() && ld.getBlockYMask().cardinality() == ld.getBlockUpdates().size() && ld.getSkyUpdates().stream().allMatch(a -> a.length == 2048), "sky=" + ld.getSkyYMask().cardinality() + " empty=" + ld.getEmptySkyYMask().cardinality());
+                        check("chunk: light: masks and arrays consistent", ld.getSkyYMask().cardinality() == ld.getSkyUpdates().size() && ld.getBlockYMask().cardinality() == ld.getBlockUpdates().size() && ld.getSkyUpdates().stream().allMatch(a -> a.length == 2048), "sky=" + ld.getSkyYMask().cardinality() + " empty=" + ld.getEmptySkyYMask().cardinality());
                     }
                 } catch (Throwable t) {
                     chunkBad++;
@@ -229,10 +229,10 @@ public class Verify {
                 check("add_entity: typ = player", ae.getType() == EntityType.PLAYER, "id=" + ae.getId());
             }
         }
-        check("play: wszystkie pakiety zdekodowane prawdziwymi kodekami i w pełni zużyte", playBad == 0, play.size() + " pakietów");
-        check("play: chunki w całości odczytane przez LevelChunkSection.read", chunkBad == 0 && chunksChecked > 0, chunksChecked + " chunków");
-        System.out.println("  typy play: " + counts);
-        System.out.println("== WYNIK: " + ok + " OK, " + fail + " BŁĘDÓW");
+        check("play: all packets decoded with the real codecs and fully consumed", playBad == 0, play.size() + " packets");
+        check("play: chunks fully read by LevelChunkSection.read", chunkBad == 0 && chunksChecked > 0, chunksChecked + " chunks");
+        System.out.println("  play types: " + counts);
+        System.out.println("== RESULT: " + ok + " OK, " + fail + " FAILURES");
         System.exit(fail == 0 ? 0 : 1);
     }
 
@@ -243,6 +243,6 @@ public class Verify {
     static String diffKeys(Set<String> a, Set<String> b) {
         Set<String> onlyA = new TreeSet<>(a); onlyA.removeAll(b);
         Set<String> onlyB = new TreeSet<>(b); onlyB.removeAll(a);
-        return "tylko vanilla=" + onlyA + " tylko rust=" + onlyB;
+        return "only vanilla=" + onlyA + " only rust=" + onlyB;
     }
 }

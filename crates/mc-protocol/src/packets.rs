@@ -1,5 +1,5 @@
-//! Pakiety faz handshake / status / login / configuration (układ pól odtworzony z kodu vanilla 1.21.1).
-//! Stan `play` mieszka w `play` (kodowanie po stronie serwera).
+//! Packets of the handshake / status / login / configuration phases (field layout reconstructed from vanilla 1.21.1 code).
+//! The `play` state lives in `play` (server-side encoding).
 
 use crate::buf::{Put, Reader};
 use crate::error::Result;
@@ -69,7 +69,7 @@ impl LoginHello {
     }
 }
 
-/// Login disconnect używa komponentu JSON (nie NBT).
+/// Login disconnect uses a JSON component (not NBT).
 pub fn login_disconnect(reason: &crate::text::Text) -> Vec<u8> {
     payload(ids::login::clientbound::LOGIN_DISCONNECT, |w| w.put_string(&reason.to_json().to_string()))
 }
@@ -83,7 +83,7 @@ pub fn login_encryption_request(server_id: &str, public_key_der: &[u8], challeng
     })
 }
 
-/// Serverbound `key`: współdzielony sekret i token weryfikacyjny, oba zaszyfrowane RSA.
+/// Serverbound `key`: shared secret and verify token, both RSA-encrypted.
 #[derive(Debug, Clone)]
 pub struct LoginKey {
     pub shared_secret: Vec<u8>,
@@ -113,7 +113,7 @@ pub struct GameProfile {
     pub properties: Vec<(String, String, Option<String>)>,
 }
 
-/// Clientbound `game_profile` (Login Success). W 1.21.1 kończy się flagą `strictErrorHandling`.
+/// Clientbound `game_profile` (Login Success). In 1.21.1 it ends with the `strictErrorHandling` flag.
 pub fn login_success(p: &GameProfile, strict_error_handling: bool) -> Vec<u8> {
     payload(ids::login::clientbound::GAME_PROFILE, |w| {
         w.put_uuid(p.id);
@@ -136,7 +136,7 @@ pub fn login_success(p: &GameProfile, strict_error_handling: bool) -> Vec<u8> {
 
 // ----------------------------------------------------------- configuration
 
-/// `minecraft:brand` jako `custom_payload`: kanał + (VarInt-string z nazwą serwera).
+/// `minecraft:brand` as a `custom_payload`: channel + (VarInt-prefixed string with the server name).
 pub fn config_brand(brand: &str) -> Vec<u8> {
     payload(ids::configuration::clientbound::CUSTOM_PAYLOAD, |w| {
         w.put_string("minecraft:brand");
@@ -171,7 +171,7 @@ fn write_known_packs(w: &mut Vec<u8>, packs: &[KnownPack]) {
         w.put_string(&p.version);
     }
 }
-/// Serverbound `select_known_packs` (limit 64 wpisów jak w vanilla).
+/// Serverbound `select_known_packs` (limit of 64 entries like vanilla).
 pub fn decode_known_packs(r: &mut Reader<'_>) -> Result<Vec<KnownPack>> {
     let n = r.varint()?;
     if !(0..=64).contains(&n) {
@@ -183,7 +183,7 @@ pub fn encode_known_packs_serverbound(packs: &[KnownPack]) -> Vec<u8> {
     payload(ids::configuration::serverbound::SELECT_KNOWN_PACKS, |w| write_known_packs(w, packs))
 }
 
-/// Jeden wpis rejestru: identyfikator + opcjonalne dane NBT (brak = klient użyje własnych z known packs).
+/// One registry entry: identifier + optional NBT data (none = the client uses its own from known packs).
 pub struct RegistryEntry {
     pub id: String,
     pub data: Option<Tag>,
@@ -206,7 +206,7 @@ pub fn config_registry_data(registry: &str, entries: &[RegistryEntry]) -> Vec<u8
     })
 }
 
-/// `update_tags`: rejestr -> (tag -> lista ID).
+/// `update_tags`: registry -> (tag -> list of IDs).
 pub fn config_update_tags(tags: &[(String, Vec<(String, Vec<i32>)>)]) -> Vec<u8> {
     payload(ids::configuration::clientbound::UPDATE_TAGS, |w| write_tags(w, tags))
 }
@@ -235,7 +235,7 @@ pub fn config_disconnect(reason: &crate::text::Text) -> Vec<u8> {
     payload(ids::configuration::clientbound::DISCONNECT, |w| reason.to_nbt().write_network(w))
 }
 
-/// Serverbound `client_information` (wspólne dla configuration i play).
+/// Serverbound `client_information` (shared by configuration and play).
 #[derive(Debug, Clone)]
 pub struct ClientInformation {
     pub language: String,

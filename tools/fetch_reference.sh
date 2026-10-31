@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Narzędzie REA: pobiera oficjalny serwer Minecraft 1.21.1 (protokół 767) od Mojang,
-# weryfikuje SHA1 i uruchamia OFICJALNY generator danych (net.minecraft.data.Main).
-# Wynik ląduje w ./reference/ (w .gitignore) - nie commitujemy plików Mojang.
+# Reverse-engineering tool: downloads the official Minecraft 1.21.1 server (protocol 767) from Mojang,
+# verifies SHA1 and runs the OFFICIAL data generator (net.minecraft.data.Main).
+# The output goes to ./reference/ (git-ignored): Mojang files are never committed.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

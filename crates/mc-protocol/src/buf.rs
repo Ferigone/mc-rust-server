@@ -1,9 +1,9 @@
-//! Odczyt i zapis podstawowych typów protokołu (odpowiednik `FriendlyByteBuf`).
+//! Reading and writing the basic protocol types (the equivalent of `FriendlyByteBuf`).
 
 use crate::error::{Error, Result};
 use uuid::Uuid;
 
-/// Kursor odczytu po buforze pakietu.
+/// Read cursor over a packet buffer.
 pub struct Reader<'a> {
     data: &'a [u8],
     pos: usize,
@@ -22,7 +22,7 @@ impl<'a> Reader<'a> {
         self.remaining() == 0
     }
 
-    /// Zwraca resztę bufora i przesuwa kursor na koniec.
+    /// Returns the rest of the buffer and moves the cursor to the end.
     pub fn rest(&mut self) -> &'a [u8] {
         let r = &self.data[self.pos..];
         self.pos = self.data.len();
@@ -90,7 +90,7 @@ impl<'a> Reader<'a> {
         Err(Error::VarTooLong)
     }
 
-    /// `FriendlyByteBuf.readUtf(maxChars)`: długość w bajtach <= max*3, liczba jednostek UTF-16 <= max.
+    /// `FriendlyByteBuf.readUtf(maxChars)`: byte length <= max*3, number of UTF-16 units <= max.
     pub fn string(&mut self, max_chars: usize) -> Result<String> {
         let len = self.varint()?;
         if len < 0 {
@@ -141,7 +141,7 @@ pub fn unpack_block_pos(v: i64) -> (i32, i32, i32) {
     ((v >> 38) as i32, ((v << 52) >> 52) as i32, ((v << 26) >> 38) as i32)
 }
 
-/// Zapis typów protokołu do `Vec<u8>`.
+/// Writing protocol types into a `Vec<u8>`.
 pub trait Put {
     fn put_u8(&mut self, v: u8);
     fn put_i8(&mut self, v: i8) {
@@ -181,7 +181,7 @@ pub trait Put {
     fn put_block_pos(&mut self, x: i32, y: i32, z: i32) {
         self.put_i64(pack_block_pos(x, y, z));
     }
-    /// `writeLongArray`: VarInt długość + longi.
+    /// `writeLongArray`: VarInt length + longs.
     fn put_long_array(&mut self, v: &[i64]) {
         self.put_varint(v.len() as i32);
         for x in v {
@@ -237,7 +237,7 @@ impl Put for Vec<u8> {
     }
 }
 
-/// UUID offline jak w vanilla: `UUID.nameUUIDFromBytes("OfflinePlayer:<nick>")` (MD5, wersja 3).
+/// Offline UUID like vanilla: `UUID.nameUUIDFromBytes("OfflinePlayer:<name>")` (MD5, version 3).
 pub fn offline_uuid(name: &str) -> Uuid {
     use md5::{Digest, Md5};
     let mut h = Md5::new();
@@ -254,7 +254,7 @@ mod tests {
 
     #[test]
     fn varint_roundtrip_and_known_vectors() {
-        // Wektory z dokumentacji protokołu.
+        // Vectors from the protocol documentation.
         let cases: &[(i32, &[u8])] = &[
             (0, &[0x00]),
             (1, &[0x01]),
@@ -285,7 +285,7 @@ mod tests {
         for &(x, y, z) in &[(0, 0, 0), (-1, -64, -1), (33554431, 2047, -33554432), (18357644, 831, -20882616)] {
             assert_eq!(unpack_block_pos(pack_block_pos(x, y, z)), (x, y, z));
         }
-        // Przykład z dokumentacji: (18357644, 831, -20882616)
+        // Example from the documentation: (18357644, 831, -20882616)
         assert_eq!(pack_block_pos(18357644, 831, -20882616), 0x4607632C15B4833F);
     }
 

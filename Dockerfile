@@ -34,8 +34,8 @@ RUN chmod +x /usr/local/bin/entrypoint.sh
 ENV MC_DATA_DIR=/opt/mc-data \
     MC_DIR=/data \
     RUST_LOG=info
-# the world, server.properties and player data live here: mount a volume on /data
-VOLUME /data
+# the world, server.properties and player data live in /data: mount a volume there (Railway rejects the VOLUME instruction;
+# with plain Docker use -v NAME:/data)
 WORKDIR /data
 EXPOSE 25565
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

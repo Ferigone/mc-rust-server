@@ -2,6 +2,10 @@
 //!
 //! Everything here is deterministic and is checked bit for bit against the real Mojang classes by `tools/verify_noise.sh`.
 
+pub mod density;
 pub mod mth;
 pub mod noise;
+pub mod noise_chunk;
 pub mod random;
+pub mod random_state;
+pub mod spline;

@@ -1,9 +1,10 @@
-//! Compares the surface stage (biomes, `BiomeManager` zoom, `SurfaceSystem`, `SurfaceRules`, badlands / iceberg extensions)
-//! with the real Mojang classes: blocks and `WORLD_SURFACE_WG` heightmap of the first chunk found for every biome.
-//! The reference comes from `tools/terrain/.../SurfaceRef.java` (`tools/verify_surface.sh`); skipped when it is missing.
+//! Compares the surface stage (biomes, `BiomeManager` zoom, `SurfaceSystem`, `SurfaceRules`, badlands / iceberg extensions) and the
+//! carvers with the real Mojang classes: blocks and `WORLD_SURFACE_WG` heightmap of the first chunk found for every biome.
+//! The reference comes from `tools/terrain/.../SurfaceRef.java` (`tools/verify_surface.sh`, `tools/verify_carvers.sh`); skipped when it is missing.
 
 use mc_data::{BlockProps, Blocks};
 use mc_worldgen::biome_manager::{BiomeManager, ChunkBiomes};
+use mc_worldgen::carver::{apply_carvers, CarveEnv, CarveStates, CarverSet, CarvingMask};
 use mc_worldgen::biome_source::BiomeSource;
 use mc_worldgen::noise_chunk::NoiseChunk;
 use mc_worldgen::random_state::{GeneratorSettings, NoiseSettings, RandomState, TerrainBlocks, WorldgenData};
@@ -37,10 +38,19 @@ impl Reader<'_> {
 
 #[test]
 fn surface_matches_the_real_surface_system() {
+    compare("surface_manifest.txt", false);
+}
+
+#[test]
+fn carvers_match_the_real_carvers() {
+    compare("carver_manifest.txt", true);
+}
+
+fn compare(manifest_file: &str, carve: bool) {
     let work = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../reference/work");
     let generated = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../reference/gen/generated");
-    let Ok(manifest) = std::fs::read_to_string(work.join("surface_manifest.txt")) else {
-        eprintln!("surface_manifest.txt not found (run tools/verify_surface.sh): skipped");
+    let Ok(manifest) = std::fs::read_to_string(work.join(manifest_file)) else {
+        eprintln!("{manifest_file} not found (run tools/verify_surface.sh / tools/verify_carvers.sh): skipped");
         return;
     };
     let blocks = Blocks::load(&generated.join("reports/blocks.json")).unwrap();
@@ -49,10 +59,14 @@ fn surface_matches_the_real_surface_system() {
     let states = SurfaceStates::resolve(&blocks).unwrap();
     let data = WorldgenData::load(&generated.join("data/minecraft/worldgen")).unwrap();
     let st = |n: &str| blocks.default_state(n).unwrap_or_else(|| panic!("missing {n}")) as u16;
+    let carvers = CarverSet::load(&generated, &blocks).unwrap();
+    let carve_states = CarveStates::resolve(&blocks).unwrap();
+    let mut carved_blocks = 0usize;
     let name = |id: u16| blocks.block_of_state(id as u32).map_or("?".to_owned(), |b| b.name.clone());
     let (mut total, mut bad) = (0usize, Vec::new());
     let mut placed: BTreeMap<String, usize> = BTreeMap::new();
     let mut biomes_seen: BTreeMap<String, usize> = BTreeMap::new();
+    let mut pairs: BTreeMap<(String, String), usize> = BTreeMap::new();
     for line in manifest.lines() {
         // file settings seed kind min_y height max_ring step
         let f: Vec<&str> = line.split_whitespace().collect();
@@ -140,13 +154,28 @@ fn surface_matches_the_real_surface_system() {
             let mut chunk = SurfaceChunk::new(cx, cz, acc_min_y, acc_height, all, &query);
             let biome_at = |x: i32, y: i32, z: i32| manager.get_biome(x, y, z);
             system.build_surface(&mut chunk, &nc, &rule, &biome_at, &climate, &query, settings.legacy_random_source);
+            if carve {
+                // ChunkGenerator.applyCarvers: the biome manager asks the biome source directly (no chunk grids)
+                let direct = |qx: i32, qy: i32, qz: i32| source.get_noise_biome(qx, qy, qz, &state.sampler);
+                let carve_manager = BiomeManager::new(&direct, seed);
+                let carve_biome_at = |x: i32, y: i32, z: i32| carve_manager.get_biome(x, y, z);
+                let env = CarveEnv { range: gen_range, noise_chunk: &nc, system: &system, rule: &rule, biome_at: &carve_biome_at, climate: &climate, query: &query, states: carve_states };
+                let mut mask = CarvingMask::new(acc_height, acc_min_y);
+                apply_carvers(&env, &mut chunk, &mut mask, seed, &source, &state.sampler, &carvers);
+                carved_blocks += mask.count();
+            }
 
+            // the reference reads ChunkAccess.getBlockState
+            let observed = chunk.vanilla_view(&query, tb.air);
             total += 1;
             *biomes_seen.entry(centre.to_owned()).or_default() += 1;
-            for &s in &chunk.blocks {
+            for &s in &observed {
                 *placed.entry(name(s)).or_default() += 1;
             }
-            let diffs: Vec<usize> = (0..expected.len()).filter(|&k| expected[k] != chunk.blocks[k]).collect();
+            let diffs: Vec<usize> = (0..expected.len()).filter(|&k| expected[k] != observed[k]).collect();
+            for &k in &diffs {
+                *pairs.entry((name(expected[k]), name(observed[k]))).or_default() += 1;
+            }
             let hm_ok = (0..256).all(|i| chunk.height_at(i & 15, i >> 4) == expected_hm[i as usize]);
             if !diffs.is_empty() || !hm_ok {
                 let k = diffs.first().copied().unwrap_or(0);
@@ -158,7 +187,7 @@ fn surface_matches_the_real_surface_system() {
                     (k >> 8) as i32 + acc_min_y,
                     cz * 16 + ((k >> 4) & 15) as i32,
                     name(expected[k]),
-                    name(chunk.blocks[k]),
+                    name(observed[k]),
                     if hm_ok { "identical" } else { "DIFFERENT" }
                 ));
             }
@@ -167,6 +196,18 @@ fn surface_matches_the_real_surface_system() {
     }
     assert!(total > 0);
     eprintln!("{total} chunks compared, {} block types occur, {} biomes at the chunk centres", placed.len(), biomes_seen.len());
+    if carve {
+        eprintln!("{carved_blocks} blocks were carved");
+        assert!(carved_blocks > 10_000, "the carvers should have carved many blocks, got {carved_blocks}");
+    }
+    if !pairs.is_empty() {
+        let mut list: Vec<_> = pairs.iter().collect();
+        list.sort_by_key(|e| std::cmp::Reverse(*e.1));
+        eprintln!("most frequent differences (vanilla -> Rust):");
+        for ((a, b), n) in list.iter().take(12) {
+            eprintln!("  {n:8}  {a} -> {b}");
+        }
+    }
     assert!(bad.is_empty(), "{} of {total} chunks differ from the real surface system:\n{}", bad.len(), bad.join("\n"));
-    eprintln!("all {total} chunks (blocks and WORLD_SURFACE_WG heightmaps) are identical to the real surface system");
+    eprintln!("all {total} chunks (blocks and WORLD_SURFACE_WG heightmaps) are identical to the real {}", if carve { "surface system and carvers" } else { "surface system" });
 }

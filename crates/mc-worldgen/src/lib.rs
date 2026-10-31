@@ -6,6 +6,7 @@ pub mod biome_climate;
 pub mod biome_manager;
 pub mod biome_source;
 pub mod biomes;
+pub mod carver;
 pub mod climate;
 pub mod density;
 pub mod mth;

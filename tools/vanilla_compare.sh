@@ -28,7 +28,7 @@ spawn-protection=0
 gamemode=creative
 force-gamemode=true'
 { echo "$S"; echo "server-port=$VP"; } > "$W/vanilla/server.properties"
-{ echo "online-mode=false"; echo "level-seed=12345"; echo "view-distance=10"; echo "simulation-distance=10"; echo "gamemode=creative"; echo "force-gamemode=true"; echo "server-port=$RP"; } > "$W/rust/server.properties"
+{ echo "online-mode=false"; echo 'level-type=minecraft\:flat'; echo "level-seed=12345"; echo "view-distance=10"; echo "simulation-distance=10"; echo "gamemode=creative"; echo "force-gamemode=true"; echo "server-port=$RP"; } > "$W/rust/server.properties"
 # Every test player starts at its own fixed position (player data read by both servers) instead of a random spawn
 # position, so the test cases cannot interfere with each other's block edits.
 i=0

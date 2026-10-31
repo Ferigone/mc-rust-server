@@ -110,6 +110,12 @@ impl ChunkBiomes {
         Self { min_quart_y: min_y >> 2, quart_height: height >> 2, cells }
     }
 
+    /// Every distinct biome of the chunk (`PalettedContainer.getAll`).
+    pub fn all_biomes(&self) -> Vec<&'static str> {
+        let mut seen = std::collections::HashSet::new();
+        self.cells.iter().copied().filter(|b| seen.insert(*b)).collect()
+    }
+
     /// `ChunkAccess.getNoiseBiome(quartX, quartY, quartZ)`: the quart y is clamped to the chunk's range.
     pub fn get_noise_biome(&self, qx: i32, qy: i32, qz: i32) -> &'static str {
         let y = qy.clamp(self.min_quart_y, self.min_quart_y + self.quart_height - 1) - self.min_quart_y;

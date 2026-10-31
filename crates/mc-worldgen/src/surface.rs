@@ -27,6 +27,10 @@ pub trait BlockQuery {
     fn has_fluid(&self, state: u16) -> bool;
     /// `a.is(b.getBlock())`
     fn same_block(&self, a: u16, b: u16) -> bool;
+    /// `BlockState.blocksMotion()`
+    fn blocks_motion(&self, state: u16) -> bool;
+    /// `state.getBlock() instanceof LeavesBlock`
+    fn is_leaves(&self, state: u16) -> bool;
 }
 
 /// `BlockQuery` backed by the generated game data (`blocks.json` and `block_props.tsv`).
@@ -49,6 +53,14 @@ impl BlockQuery for GameBlockQuery<'_> {
             (Some(x), Some(y)) => std::ptr::eq(x, y),
             _ => false,
         }
+    }
+
+    fn blocks_motion(&self, state: u16) -> bool {
+        self.props.state(state as u32).is_some_and(|s| s.has(mc_data::props::flag::BLOCKS_MOTION))
+    }
+
+    fn is_leaves(&self, state: u16) -> bool {
+        self.blocks.block_of_state(state as u32).is_some_and(|b| b.name.ends_with("_leaves"))
     }
 }
 

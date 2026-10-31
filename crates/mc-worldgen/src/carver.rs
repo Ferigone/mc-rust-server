@@ -13,7 +13,7 @@ use crate::surface::{Anchor, BlockQuery, GenContext, SurfaceChunk, SurfaceRule, 
 use anyhow::{anyhow, bail, Context, Result};
 use mc_data::Blocks;
 use serde_json::Value;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::OnceLock;
 
@@ -98,21 +98,42 @@ impl FloatProvider {
 pub enum HeightProvider {
     Constant(Anchor),
     Uniform { min: Anchor, max: Anchor },
+    Trapezoid { min: Anchor, max: Anchor, plateau: i32 },
 }
 
 impl HeightProvider {
-    fn parse(v: &Value) -> Result<Self> {
+    pub fn parse(v: &Value) -> Result<Self> {
         match v.get("type").and_then(Value::as_str) {
             None => Ok(Self::Constant(Anchor::parse(v)?)),
             Some("minecraft:constant") => Ok(Self::Constant(Anchor::parse(&v["value"])?)),
             Some("minecraft:uniform") => Ok(Self::Uniform { min: Anchor::parse(&v["min_inclusive"])?, max: Anchor::parse(&v["max_inclusive"])? }),
+            Some("minecraft:trapezoid") => Ok(Self::Trapezoid {
+                min: Anchor::parse(&v["min_inclusive"])?,
+                max: Anchor::parse(&v["max_inclusive"])?,
+                plateau: v.get("plateau").and_then(Value::as_i64).unwrap_or(0) as i32,
+            }),
             other => bail!("unsupported height provider {other:?}"),
         }
     }
 
-    fn sample(&self, r: &mut dyn RandomSource, g: GenContext) -> i32 {
+    pub fn sample(&self, r: &mut dyn RandomSource, g: GenContext) -> i32 {
         match *self {
             Self::Constant(a) => a.resolve(g),
+            Self::Trapezoid { min, max, plateau } => {
+                let (lo, hi) = (min.resolve(g), max.resolve(g));
+                if lo > hi {
+                    return lo;
+                }
+                let span = hi - lo;
+                if plateau >= span {
+                    r.next_int_bound(hi - lo + 1) + lo
+                } else {
+                    let a = (span - plateau) / 2;
+                    let b = span - a;
+                    let first = r.next_int_bound(b + 1);
+                    lo + first + r.next_int_bound(a + 1)
+                }
+            }
             Self::Uniform { min, max } => {
                 let (lo, hi) = (min.resolve(g), max.resolve(g));
                 if lo > hi { lo } else { r.next_int_bound(hi - lo + 1) + lo }
@@ -164,57 +185,7 @@ pub enum Carver {
     Canyon(CanyonConfig),
 }
 
-fn resolve_tag(root: &Path, name: &str, out: &mut BTreeSet<String>, depth: usize) -> Result<()> {
-    if depth > 16 {
-        bail!("tag recursion in {name}");
-    }
-    let path = root.join("data/minecraft/tags/block").join(format!("{}.json", name.trim_start_matches("minecraft:")));
-    let v: Value = serde_json::from_slice(&std::fs::read(&path).with_context(|| path.display().to_string())?)?;
-    for e in v["values"].as_array().ok_or_else(|| anyhow!("{name}: no values"))? {
-        let id = match e {
-            Value::String(s) => s.as_str(),
-            Value::Object(o) => o.get("id").and_then(Value::as_str).ok_or_else(|| anyhow!("bad tag entry"))?,
-            _ => bail!("bad tag entry"),
-        };
-        match id.strip_prefix('#') {
-            Some(t) => resolve_tag(root, t, out, depth + 1)?,
-            None => {
-                out.insert(id.to_owned());
-            }
-        }
-    }
-    Ok(())
-}
-
-fn replaceable_states(root: &Path, blocks: &Blocks, v: &Value) -> Result<Vec<bool>> {
-    let mut names = BTreeSet::new();
-    let add = |s: &str, names: &mut BTreeSet<String>| -> Result<()> {
-        match s.strip_prefix('#') {
-            Some(t) => resolve_tag(root, t, names, 0),
-            None => {
-                names.insert(s.to_owned());
-                Ok(())
-            }
-        }
-    };
-    match v {
-        Value::String(s) => add(s, &mut names)?,
-        Value::Array(list) => {
-            for e in list {
-                add(e.as_str().ok_or_else(|| anyhow!("bad replaceable entry"))?, &mut names)?;
-            }
-        }
-        _ => bail!("bad replaceable {v}"),
-    }
-    let mut out = vec![false; blocks.state_count as usize];
-    for n in &names {
-        let info = blocks.by_name.get(n).map(|&i| &blocks.list[i]).ok_or_else(|| anyhow!("unknown block {n} in a carver tag"))?;
-        for s in info.min_state..=info.max_state {
-            out[s as usize] = true;
-        }
-    }
-    Ok(out)
-}
+use crate::tags::replaceable_states;
 
 fn parse_common(root: &Path, blocks: &Blocks, c: &Value) -> Result<CarverCommon> {
     Ok(CarverCommon {

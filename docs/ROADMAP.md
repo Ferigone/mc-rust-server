@@ -56,8 +56,11 @@ classes: random number generators and noises (`tools/verify_noise.sh`, 878 value
 `NoiseRouter`, `NoiseChunk` with cell interpolation, the aquifer and ore veins, i.e. the terrain shape of every vanilla noise setting
 (`tools/verify_terrain.sh`: 5,760 router values, 34 chunks); the biome sources (`Climate` with the R-tree, `OverworldBiomeBuilder`, nether
 preset, End, world spawn search, biome temperatures; 272,507 values); the surface stage (`SurfaceSystem` / `SurfaceRules`, `BiomeManager` zoom, biome temperature;
-`tools/verify_surface.sh`: 223 chunks); the carvers (cave, canyon, nether cave; `tools/verify_carvers.sh`: 223 chunks). Still to do: `Beardifier` / terrain adaptation to structures, features / placed
-features, structures, the Nether and End dimensions, and speeding the generator up. The generator is wired into the server for the overworld
+`tools/verify_surface.sh`: 223 chunks); the carvers (cave, canyon, nether cave; `tools/verify_carvers.sh`: 223 chunks); the feature decoration framework (`FeatureSorter` order, `WorldgenRandom`, the `WorldGenRegion` of the FEATURES step, placement
+modifiers `count` / `in_square` / `height_range` / `biome` / `rarity_filter`) and the `ore` / `scattered_ore` features, i.e. 40 of the 233 placed features
+(`tools/verify_features.sh`: 2,007 decorated chunks). Still to do: the other 193 placed features (disks, springs, simple blocks, selectors, random patches, trees, vegetation, lakes,
+geodes, ...) with their placement modifiers, block predicates and state providers, wiring the decoration into the server (3x3 decorated / 5x5 carved chunks), `Beardifier` / terrain adaptation to structures,
+structures, the Nether and End dimensions, and speeding the generator up. The generator is wired into the server for the overworld
 (new worlds and chunks missing from the region files; unmodified generated chunks are not saved, they are regenerated, so later stages improve them).
 Verification: the same seed → the same blocks as the real generator in a Java harness, chunk by chunk, stage by stage.
 

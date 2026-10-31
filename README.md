@@ -78,6 +78,7 @@ Mojang's servers onto the user's machine. Running the original server requires a
 | `tools/vanilla_compare.sh` | Differential test against the real vanilla server (requires `MC_EULA_ACCEPTED=true`). |
 | `tools/world_compare.sh`, `tools/world_compare.py` | World persistence test: vanilla generates a world, both servers load it and their chunk packets are compared; then the Rust server edits and saves the world and vanilla loads it (requires `MC_EULA_ACCEPTED=true`). |
 | `tools/remap.sh` | Produces `server-named.jar`, the vanilla server with Mojang's official names (shared by the tools below). |
+| `tools/verify_features.sh` | Runs the real `FeatureSorter` and `WorldgenRandom` (`FeatureRef.java`) and compares the feature order per decoration step and the random streams. |
 | `tools/verify_carvers.sh` | Runs the real surface stage and carvers (`SurfaceRef.java` with `carve`, 9 settings, 223 chunks) and compares the Rust port. |
 | `tools/worldgen_smoke.sh` | Starts a fresh normal world and lets the bot join (chunk packets of generated terrain decode, no panic). |
 | `tools/terrain_check.sh` | Generates again the chunks of a world made by the vanilla server and compares the blocks (`mc-server --check-terrain`). |
@@ -266,6 +267,18 @@ the aquifer and fills lava up to `minGenY + 31`); the biome manager of the carve
 `ChunkAccess.getBlockState` answers plain `air` for every position of a section that holds only air-class blocks, even where it stores `cave_air` (the test applies the
 same view to the Rust chunk; the stored section keeps `cave_air`, which is what the server sends). This also found that a harness must bind the block tags after loading the
 data pack (the carvers' `replaceable` sets are tags): without it the real carvers replace nothing.
+
+## Feature decoration order test (milestone 5, part 7, first half)
+
+Features are placed per decoration step in the order `FeatureSorter` computes, and every placed feature is seeded with its **index in that order**
+(`WorldgenRandom.setFeatureSeed(decorationSeed, index, step)`), so the order has to be exact before any feature can match. `tools/verify_features.sh` runs the
+real `FeatureSorter` and `WorldgenRandom` (`tools/terrain/.../FeatureRef.java`) and `crates/mc-worldgen/tests/feature_parity.rs` compares the Rust port:
+**the sorted feature lists of all three dimensions (151 overworld, 37 nether and 5 End features over 11 / 10 / 11 steps) and the random streams are identical**
+(209 values). Reproduced: `PlacedFeature` is a record, so entries with the same configured feature and modifiers share one index; the topological sort is a
+depth-first search over `TreeMap`/`TreeSet`s ordered by (step, discovery index); `WorldgenRandom` extends the *legacy* random source, so over a Xoroshiro
+source it uses the legacy `nextInt`/`nextFloat`/`nextDouble`/`nextLong` algorithms on `nextLong() >>> (64 - bits)`, and `setSeed` does not reset its cached Gaussian.
+
+The placement modifiers, providers and the features themselves follow in the next stages.
 
 ## Generator integration check (milestone 5, part 5)
 

@@ -23,6 +23,17 @@ impl BiomeSource {
         BiomeSource::MultiNoise(nether_list())
     }
 
+    /// `BiomeSource.possibleBiomes()`: the distinct biomes in order of first appearance.
+    pub fn possible_biomes(&self) -> Vec<&'static str> {
+        let all: Vec<&'static str> = match self {
+            BiomeSource::MultiNoise(list) => list.values().iter().map(|(_, b)| *b).collect(),
+            BiomeSource::End => vec![b::THE_END, b::END_HIGHLANDS, b::END_MIDLANDS, b::SMALL_END_ISLANDS, b::END_BARRENS],
+            BiomeSource::Fixed(biome) => vec![*biome],
+        };
+        let mut seen = std::collections::HashSet::new();
+        all.into_iter().filter(|b| seen.insert(*b)).collect()
+    }
+
     /// `getNoiseBiome(quartX, quartY, quartZ, sampler)` (a biome cell is 4x4x4 blocks)
     pub fn get_noise_biome(&self, qx: i32, qy: i32, qz: i32, sampler: &Sampler) -> &'static str {
         match self {

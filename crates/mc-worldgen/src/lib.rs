@@ -8,6 +8,7 @@ pub mod biome_source;
 pub mod biomes;
 pub mod carver;
 pub mod climate;
+pub mod decoration;
 pub mod density;
 pub mod mth;
 pub mod noise;

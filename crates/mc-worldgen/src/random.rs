@@ -142,6 +142,89 @@ impl RandomSource for LegacyRandomSource {
     }
 }
 
+/// `WorldgenRandom` over a `XoroshiroRandomSource`: the class extends `LegacyRandomSource`, so every method is the legacy algorithm
+/// on top of `next(bits)`, which here takes the high bits of the inner generator's `nextLong()`. `setSeed` only reseeds the inner
+/// generator (the cached Gaussian of the wrapper survives it, as in vanilla).
+pub struct WorldgenRandom {
+    inner: XoroshiroRandomSource,
+    gaussian: Gaussian,
+}
+
+impl WorldgenRandom {
+    pub fn new(seed: i64) -> Self {
+        Self { inner: XoroshiroRandomSource::new(seed), gaussian: Gaussian::default() }
+    }
+
+    fn next(&mut self, bits: u32) -> i32 {
+        ((self.inner.next_long() as u64) >> (64 - bits)) as i32
+    }
+
+    /// `setDecorationSeed(worldSeed, x, z)`: returns the decoration seed
+    pub fn set_decoration_seed(&mut self, seed: i64, x: i32, z: i32) -> i64 {
+        self.set_seed(seed);
+        let a = self.next_long() | 1;
+        let b = self.next_long() | 1;
+        let r = (x as i64).wrapping_mul(a).wrapping_add((z as i64).wrapping_mul(b)) ^ seed;
+        self.set_seed(r);
+        r
+    }
+
+    /// `setFeatureSeed(decorationSeed, index, step)`
+    pub fn set_feature_seed(&mut self, decoration_seed: i64, index: i32, step: i32) {
+        self.set_seed(decoration_seed.wrapping_add(index as i64).wrapping_add(10000i64.wrapping_mul(step as i64)));
+    }
+}
+
+impl RandomSource for WorldgenRandom {
+    fn fork(&mut self) -> Box<dyn RandomSource> {
+        self.inner.fork()
+    }
+    fn fork_positional(&mut self) -> PositionalRandomFactory {
+        self.inner.fork_positional()
+    }
+    fn set_seed(&mut self, seed: i64) {
+        self.inner.set_seed(seed);
+    }
+    fn next_int(&mut self) -> i32 {
+        self.next(32)
+    }
+    fn next_int_bound(&mut self, bound: i32) -> i32 {
+        assert!(bound > 0, "Bound must be positive");
+        if bound & (bound - 1) == 0 {
+            return ((bound as i64).wrapping_mul(self.next(31) as i64) >> 31) as i32;
+        }
+        loop {
+            let bits = self.next(31);
+            let val = bits % bound;
+            if bits.wrapping_sub(val).wrapping_add(bound - 1) >= 0 {
+                return val;
+            }
+        }
+    }
+    fn next_long(&mut self) -> i64 {
+        let hi = self.next(32);
+        let lo = self.next(32);
+        ((hi as i64) << 32).wrapping_add(lo as i64)
+    }
+    fn next_boolean(&mut self) -> bool {
+        self.next(1) != 0
+    }
+    fn next_float(&mut self) -> f32 {
+        self.next(24) as f32 * FLOAT_UNIT
+    }
+    fn next_double(&mut self) -> f64 {
+        let hi = self.next(26) as i64;
+        let lo = self.next(27) as i64;
+        (((hi << 27) + lo) as f64) * DOUBLE_UNIT
+    }
+    fn next_gaussian(&mut self) -> f64 {
+        let mut g = std::mem::take(&mut self.gaussian);
+        let v = g.next(|| self.next_double());
+        self.gaussian = g;
+        v
+    }
+}
+
 /// `Xoroshiro128PlusPlus`
 #[derive(Clone)]
 pub struct Xoroshiro128PlusPlus {

@@ -3,7 +3,7 @@
 A port of the **Minecraft: Java Edition 1.21 / 1.21.1** server (protocol **767**) to Rust. The goal is 1:1 behaviour
 with the vanilla server, so that an unmodified Java 1.21 client can connect and play.
 
-> **Status: milestone 5 of about 12 is under way (world generation: random sources and noise are done) (see [docs/ROADMAP.md](docs/ROADMAP.md)).** This is a foundation, not a complete port.
+> **Status: milestone 5 of about 12 is under way (world generation: the terrain shape is done, biomes / surface / features are not) (see [docs/ROADMAP.md](docs/ROADMAP.md)).** This is a foundation, not a complete port.
 > Vanilla is ~4,000 classes and ~470,000 lines of code; this document states exactly what works and has been verified,
 > and what is still missing. It has not been tested with a real Minecraft client (none is available in the build
 > environment); it has been tested against Mojang's own decoders and in a differential test against the real vanilla
@@ -21,7 +21,7 @@ with the vanilla server, so that an unmodified Java 1.21 client can connect and 
 | Keep-alive, chat (unsigned), `/list`, visibility and movement of other players (`ServerEntity.sendChanges`) | ✅ |
 | Block breaking/placing (simplified), 20 TPS | ⚠️ simplified |
 | **Light engine** (block + sky light, section storage rules, face-shape occlusion) and real heightmaps for generated / edited chunks | ✅ identical to the vanilla server on every stored layer of a vanilla-generated world (see below); incremental `light_update` packets after edits: not yet |
-| **World generation primitives** (`crates/mc-worldgen`): `LegacyRandomSource`, `XoroshiroRandomSource`, positional factories, `ImprovedNoise`, `PerlinNoise`, `NormalNoise`, `SimplexNoise`, `BlendedNoise` | ✅ bit-identical to the Mojang classes (878 values); the terrain generator itself is not wired up yet |
+| **Terrain shape** (`crates/mc-worldgen`): random sources, all noise functions, the data-driven density function graph with splines, the wired `NoiseRouter`, `NoiseChunk` (cell interpolation, caches), the aquifer (water / lava lakes) and ore veins, for every vanilla noise setting (overworld, amplified, large biomes, nether, end, caves, floating islands) | ✅ bit-identical to the Mojang classes: 878 random / noise values, 5,760 router values, 34 generated chunks; **not wired into the server yet** (no biomes, surface blocks, carvers, features or structures, so it would look like bare stone) |
 | Block placement uses the real item→block mapping, replaceable blocks, and the real collision shapes against player hitboxes | ✅ (default block state only until `getStateForPlacement`, M7) |
 | **Worlds on disk**: Anvil regions (`.mca`, zlib/gzip/LZ4/uncompressed, external `.mcc`), `level.dat`, `playerdata/*.dat` (position, game mode, health, food, XP, inventory), stored heightmaps/light/block entities, `level-name`/`level-seed`, autosave, graceful save on Ctrl+C/SIGTERM | ✅ loads worlds of the vanilla server and writes worlds the vanilla server loads (see below) |
 | `server.properties` (same keys and defaults as vanilla) | ✅ read/write |
@@ -73,6 +73,7 @@ Mojang's servers onto the user's machine. Running the original server requires a
 | `tools/vanilla_compare.sh` | Differential test against the real vanilla server (requires `MC_EULA_ACCEPTED=true`). |
 | `tools/world_compare.sh`, `tools/world_compare.py` | World persistence test: vanilla generates a world, both servers load it and their chunk packets are compared; then the Rust server edits and saves the world and vanilla loads it (requires `MC_EULA_ACCEPTED=true`). |
 | `tools/remap.sh` | Produces `server-named.jar`, the vanilla server with Mojang's official names (shared by the tools below). |
+| `tools/verify_terrain.sh` | Runs the real `NoiseChunk` fill loop (`tools/terrain/.../TerrainRef.java`) and the real noise router (`RouterRef.java`) for 9 configurations and compares the Rust port block by block / value by value. |
 | `tools/verify_noise.sh` | Runs the real random sources and noise functions (`tools/noise/NoiseRef.java`) and compares them bit for bit with `crates/mc-worldgen`. |
 | `tools/light_check.sh` | Recomputes the light of every chunk of a vanilla-generated world and compares it with the light vanilla stored (also `mc-server --check-light`). |
 | `tools/dump_props.sh` | Runs the **real** block and item classes and dumps per-state facts (hardness, blast resistance, light emission / opacity, collision / outline / occlusion shapes, 18 flags such as `isAir`, "holds a fluid", replaceable) and per-item facts (stack size, durability, placed block) into `reference/gen/generated/reports/{block_props,item_props}.tsv`. Run by `tools/fetch_reference.sh`. |
@@ -144,6 +145,23 @@ player attributes and the world border constant.
 Run against an older world (generated, then left running for a while), the remaining differences are all changes the vanilla
 server makes by itself after loading: scheduled block/fluid ticks (leaf decay distance, flowing water and lava) and light
 that spills in from chunks that only vanilla generates. Those belong to milestones M4/M5/M7.
+
+## Terrain shape test (milestone 5, part 2)
+
+`tools/verify_terrain.sh` builds the real `RandomState` and `NoiseChunk` from the vanilla data pack and runs vanilla's
+`doFill` loop (without structure terrain adaptation) for **34 chunks of 9 configurations** (3 overworld seeds, amplified, large biomes,
+nether, end, caves, floating islands); `crates/mc-worldgen/tests/terrain_parity.rs` generates the same chunks with the Rust port and
+all block states are identical (stone, water, lava, air, copper / iron ore veins with tuff and granite). Because the block decision only
+depends on the *sign* of the final density, a second test compares **every router function** (`barrier`, `temperature`, `vegetation`,
+`continents`, `erosion`, `depth`, `ridges`, the densities, the vein functions, ...) at 48 positions in each of 8 settings: **5,760
+values, bit-identical** (this is what the biome source will need). The tests are sensitive: breaking the aquifer similarity, the ore
+vein threshold, the cell interpolation order, the `squeeze` formula or the shift scale makes them fail. This found two bugs on the
+way: the key of the legacy shift noise (`minecraft:offset`), and that the block-level test alone cannot see the magnitude of a density.
+
+Vanilla details reproduced: JSON arguments are wrapped in `HolderHolder`s so constants fold into `MulOrAdd` only when `NoiseChunk`
+unwraps them; splines compute in 32-bit floats; a cell's density comes from the `lerp3` path while ore veins use the stepwise
+`updateForY/X/Z` interpolation (they differ in the last bits); flat caches are read for every kind of context, while interpolators
+and the in-cell cache only act for the chunk context.
 
 ## World generation primitives test (milestone 5, part 1)
 

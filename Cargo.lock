@@ -515,7 +515,10 @@ dependencies = [
 name = "mc-worldgen"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "mc-data",
  "md-5",
+ "serde_json",
 ]
 
 [[package]]

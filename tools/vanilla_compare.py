@@ -94,8 +94,9 @@ def norm(tag, case):
 def trim(lst):  # vanilla sometimes adds changes from random ticks (e.g. grass -> dirt); cut the tail after the ack
     names = [n for n, _ in lst]
     return lst[: names.index("block_changed_ack") + 1] if "block_changed_ack" in names else lst
-for case, desc in (("break", "breaking a block in creative"), ("place", "placing a block (rejected: collision with the player)"), ("beside", "placing a block (successful)"), ("multi", "breaking + placing in one tick (section_blocks_update)")):
-    ok = all(trim(norm("vanilla", f"{case}{k}")) == trim(norm("rust", f"{case}{k}")) for k in (1, 2, 3) if os.path.exists(f"{D}/vanilla_{case}{k}.bin"))
+for case, desc in (("break", "breaking a block in creative"), ("place", "placing a block (rejected: collision with the player)"), ("beside", "placing a block (successful)"), ("multi", "breaking + placing in one tick (section_blocks_update)"), ("torch", "placing a torch inside the player (empty collision shape)"), ("plate", "placing a pressure plate inside the player (empty collision shape)")):
+    ks = [k for k in (1, 2, 3) if os.path.exists(f"{D}/vanilla_{case}{k}.bin")]
+    ok = bool(ks) and all(trim(norm("vanilla", f"{case}{k}")) == trim(norm("rust", f"{case}{k}")) for k in ks)  # a missing dump must not pass
     rec("order and bytes match (except the position)", f"{desc}: container_set_slot/block_update/ack", ok)
 
 # --- report

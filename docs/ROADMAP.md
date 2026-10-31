@@ -40,9 +40,13 @@ identical); a world saved by the Rust server is loaded by the vanilla server and
 Still open from this stage: executing the stored scheduled ticks (M7), light that depends on neighbouring chunks that are
 not stored (M4/M5), saving light/heightmaps of edited chunks (M4), entities/POI/structure data are preserved but not used (M6, M10, M11).
 
-**M3 — Block and item property tables.** `blocks.json` does not contain hardness, collision, light opacity, emission or
-fluids. A small Java program (running the real `Block`/`BlockState` classes after `Bootstrap`) dumps them per state into a
-file from which the Rust tables are generated. The same for items (default components, max stack size).
+**M3 ✅ Block and item property tables** (`tools/dump_props.sh`). `blocks.json` does not contain hardness, collision, light opacity, emission or
+fluids. A small Java program runs the real `Block`/`BlockState`/`Item` classes after `Bootstrap` and dumps, per state: hardness, blast
+resistance, friction, light emission and opacity, 18 flags (`isAir`, fluid, replaceable, solid, ...) and the collision / outline /
+occlusion / support / face-occlusion voxel shapes; per item: stack size, durability and the placed block. The Rust server loads the
+tables at start (`mc-data::props`) and a test checks known values of the real classes. First consumers: block placement (item →
+block, replaceable blocks, collision shapes vs. player hitboxes — differential test with a torch and a pressure plate). Still to come
+with their stages: full default component maps (M8), tool speeds and survival mining timings (M7/M8).
 
 **M4 — Light engine.** Port of `world/level/lighting` (sky/block light BFS, `DataLayer`), full heightmaps
 (`MOTION_BLOCKING`, `OCEAN_FLOOR`, …) instead of the simplified ones. Replaces the simplified sky light.

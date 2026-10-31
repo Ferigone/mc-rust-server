@@ -32,7 +32,7 @@ force-gamemode=true'
 # Every test player starts at its own fixed position (player data read by both servers) instead of a random spawn
 # position, so the test cases cannot interfere with each other's block edits.
 i=0
-for n in ZedA ChatA CmdA LstA Brk1 Brk2 Brk3 Plc1 Plc2 Plc3 Bes1 Bes2 Bes3 Mul1 Mul2 Mul3; do
+for n in ZedA ChatA CmdA LstA Brk1 Brk2 Brk3 Plc1 Plc2 Plc3 Bes1 Bes2 Bes3 Mul1 Mul2 Mul3 Tor1 Prs1; do
   for d in vanilla rust; do python3 -I "$ROOT/tools/make_playerdata.py" "$W/$d/world" "$n" "$((8 * i)).5" -60 0.5; done
   i=$((i + 1))
 done
@@ -52,6 +52,8 @@ echo "gamerule randomTickSpeed 0" >&9
 for _ in $(seq 1 40); do grep -q 'randomTickSpeed' "$W/vanilla/server.out" 2>/dev/null && break; sleep 0.25; done
 for _ in $(seq 1 40); do (echo > "/dev/tcp/127.0.0.1/$RP") 2>/dev/null && break; sleep 0.25; done
 P="$ROOT/target/release/mc-probe"; D="$W/dumps"
+item_id() { awk -F'\t' -v n="$1" '$2 == n { print $1 }' "$ROOT/reference/gen/generated/reports/item_props.tsv"; }
+TORCH=$(item_id minecraft:torch); PLATE=$(item_id minecraft:stone_pressure_plate)
 run() { # tag port nick case extra...
   local tag=$1 port=$2 nick=$3 case=$4; shift 4
   "$P" join --port "$port" --name "$nick" --secs 5 "$@" --dump "$D/${tag}_${case}.bin" >/dev/null 2>&1 || true
@@ -70,5 +72,8 @@ for t in "vanilla $VP" "rust $RP"; do set -- $t; tag=$1; port=$2
     run $tag $port "Bes$k" beside$k --place beside
   done
   for k in 1 2 3; do run $tag $port "Mul$k" multi$k --break below --place beside; done
+  # blocks without a collision shape can be placed inside the player (the item IDs come from the dumped item table)
+  run $tag $port "Tor1" torch1 --place below --item-id "$TORCH"
+  run $tag $port "Prs1" plate1 --place below --item-id "$PLATE"
 done
 python3 -I tools/vanilla_compare.py "$D"

@@ -5,6 +5,7 @@
 pub mod blocks;
 pub mod dynamic;
 pub mod nbtjson;
+pub mod props;
 pub mod tags;
 
 use anyhow::{Context, Result};
@@ -13,6 +14,7 @@ use std::path::{Path, PathBuf};
 
 pub use blocks::Blocks;
 pub use dynamic::{DynamicRegistry, SYNCHRONIZED_REGISTRIES};
+pub use props::{BlockProps, ItemProps};
 
 /// Static (built-in) registry: name -> protocol_id.
 #[derive(Debug, Default, Clone)]
@@ -26,6 +28,9 @@ pub struct GameData {
     pub root: PathBuf,
     pub registries: HashMap<String, StaticRegistry>,
     pub blocks: Blocks,
+    /// Per-state facts of the real block classes (hardness, light, shapes, flags): `tools/dump_props.sh`.
+    pub block_props: BlockProps,
+    pub item_props: ItemProps,
     /// The 11 synchronized registries in `RegistryDataLoader.SYNCHRONIZED_REGISTRIES` order.
     pub dynamic: Vec<DynamicRegistry>,
     /// Tags ready for the `update_tags` packet (registry -> [(tag, [id])]).
@@ -35,7 +40,7 @@ pub struct GameData {
 impl GameData {
     /// An empty data set (for unit tests that do not need registries or block tables).
     pub fn empty() -> Self {
-        Self { root: PathBuf::new(), registries: HashMap::new(), blocks: Blocks::default(), dynamic: Vec::new(), tags: Vec::new() }
+        Self { root: PathBuf::new(), registries: HashMap::new(), blocks: Blocks::default(), block_props: BlockProps::default(), item_props: ItemProps::default(), dynamic: Vec::new(), tags: Vec::new() }
     }
 
     /// `root` = the `generated` directory of the data generator (contains `reports/` and `data/`).
@@ -44,9 +49,14 @@ impl GameData {
         let reports = root.join("reports");
         let registries = load_registries(&reports.join("registries.json")).context("registries.json")?;
         let blocks = Blocks::load(&reports.join("blocks.json")).context("blocks.json")?;
+        let block_props = BlockProps::load(&reports.join("block_props.tsv"))?;
+        let item_props = ItemProps::load(&reports.join("item_props.tsv"))?;
+        if block_props.len() != blocks.state_count as usize {
+            anyhow::bail!("block_props.tsv has {} states, blocks.json {}: run FORCE=1 tools/dump_props.sh", block_props.len(), blocks.state_count);
+        }
         let dynamic = dynamic::load_all(&root.join("data/minecraft"))?;
         let tags = tags::build(&root.join("data/minecraft/tags"), &registries, &dynamic)?;
-        Ok(Self { root, registries, blocks, dynamic, tags })
+        Ok(Self { root, registries, blocks, block_props, item_props, dynamic, tags })
     }
 
     pub fn registry_id(&self, registry: &str, name: &str) -> Option<i32> {

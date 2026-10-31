@@ -109,17 +109,6 @@ impl Blocks {
         self.by_name.get(name).map(|&i| self.list[i].default_state)
     }
 
-    /// Whether `BlockState.getFluidState()` is non-empty for this state: the fluid blocks themselves, the blocks that
-    /// always hold water (bubble column, kelp, seagrass) and every waterlogged state. Verified against the real
-    /// classes for all states by the `fluid_rule_matches_vanilla` test (`tools/dump_block_flags.sh`).
-    pub fn has_fluid(&self, state: u32) -> bool {
-        let Some(b) = self.block_of_state(state) else { return false };
-        match b.name.as_str() {
-            "minecraft:water" | "minecraft:lava" | "minecraft:bubble_column" | "minecraft:kelp" | "minecraft:kelp_plant" | "minecraft:seagrass" | "minecraft:tall_seagrass" => true,
-            _ => self.properties_of(state).iter().any(|(k, v)| k == "waterlogged" && v == "true"),
-        }
-    }
-
     pub fn block_of_state(&self, state: u32) -> Option<&BlockInfo> {
         self.state_to_block.get(state as usize).map(|&i| &self.list[i as usize])
     }
@@ -170,24 +159,5 @@ mod tests {
             let back = b.state_id(&blk.name, props.iter().map(|(k, v)| (k.as_str(), v.as_str())));
             assert_eq!(back, Some(id), "{} {:?}", blk.name, props);
         }
-    }
-
-    /// Compares the fluid rule (and the air blocks) with a dump of the real Mojang block classes for every state.
-    /// Generate the dump with `tools/dump_block_flags.sh`; the test is skipped when it is not available.
-    #[test]
-    fn fluid_rule_matches_vanilla() {
-        let Some(b) = load() else { return };
-        let dump = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../reference/work/block_flags.txt");
-        let Ok(text) = std::fs::read_to_string(dump) else { return };
-        let mut n = 0;
-        for line in text.lines() {
-            let f: Vec<u32> = line.split(' ').map(|x| x.parse().unwrap()).collect();
-            let (id, air, fluid) = (f[0], f[1] == 1, f[2] == 1);
-            let blk = b.block_of_state(id).unwrap();
-            assert_eq!(b.has_fluid(id), fluid, "state {id} {} {:?}", blk.name, b.properties_of(id));
-            assert_eq!(matches!(blk.name.as_str(), "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air"), air, "air flag of {}", blk.name);
-            n += 1;
-        }
-        assert_eq!(n, b.state_count as usize);
     }
 }

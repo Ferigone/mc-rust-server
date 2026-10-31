@@ -13,24 +13,10 @@ mkdir -p "$T" "$REF/work" "$REF/src"
 
 dl() { [ -s "$2" ] && return; curl -fsS --retry 5 --retry-delay 5 -o "$2" "$1"; }
 dl https://repo1.maven.org/maven2/org/vineflower/vineflower/1.10.1/vineflower-1.10.1.jar "$T/vineflower.jar"
-dl https://maven.fabricmc.net/net/fabricmc/tiny-remapper/0.10.4/tiny-remapper-0.10.4-fat.jar "$T/tiny-remapper.jar"
 
-# 1) extract the actual jar from the bundler + libraries
+# 1-3) bundler -> remapped jar with Mojang's official names (shared with the other tools)
+"$ROOT/tools/remap.sh" >/dev/null
 cd "$REF/work"
-if [ ! -f server-inner.jar ]; then
-  unzip -o -q "$REF/dl/server.jar" 'META-INF/versions/*' 'META-INF/libraries/*' -d bundle
-  cp bundle/META-INF/versions/*/server-*.jar server-inner.jar
-fi
-
-# 2) ProGuard mappings -> Tiny
-[ -f mojang.tiny ] || python3 -I "$ROOT/tools/proguard2tiny.py" "$REF/dl/server_mappings.txt" mojang.tiny
-
-# 3) remap obf -> named
-if [ ! -f server-named.jar ]; then
-  # classpath = server libraries (for correct inheritance resolution)
-  java -jar "$T/tiny-remapper.jar" server-inner.jar server-named.jar mojang.tiny official named \
-    $(find bundle/META-INF/libraries -name '*.jar') >/dev/null
-fi
 
 # 4) decompilation
 if [ -z "$(ls -A "$REF/src" 2>/dev/null)" ]; then

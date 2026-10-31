@@ -1083,15 +1083,23 @@ impl Game {
         dx * dx + dy * dy + dz * dz < r * r
     }
 
-    /// Whether a block (a full cube) overlaps a player's hitbox (`isUnobstructed`; simplification: full cubes).
-    fn block_intersects_player(&self, x: i32, y: i32, z: i32) -> bool {
+    /// `LevelReader.isUnobstructed(state, pos, context)` for players: the collision shape of `state` placed at (x, y, z) must not
+    /// overlap the hitbox of a player that blocks building (every game mode but spectator). Other entities: M6.
+    fn placement_obstructed(&self, x: i32, y: i32, z: i32, state: u32) -> bool {
+        // Shapes.joinIsNotEmpty merges coordinates that differ by less than 1.0E-7; boxes that merely touch do not overlap
+        const EPS: f64 = 1.0E-7;
+        let shape = self.data.block_props.collision_shape(state);
+        if shape.is_empty() {
+            return false;
+        }
         self.players.values().any(|p| {
             if p.game_mode == 3 {
                 return false;
             }
             let h = if p.sneaking { 1.5 } else { 1.8 };
-            let (minx, maxx, miny, maxy, minz, maxz) = (p.x - 0.3, p.x + 0.3, p.y, p.y + h, p.z - 0.3, p.z + 0.3);
-            (x as f64) < maxx && (x as f64 + 1.0) > minx && (y as f64) < maxy && (y as f64 + 1.0) > miny && (z as f64) < maxz && (z as f64 + 1.0) > minz
+            let (min, max) = ([p.x - 0.3, p.y, p.z - 0.3], [p.x + 0.3, p.y + h, p.z + 0.3]);
+            let origin = [x as f64, y as f64, z as f64];
+            shape.iter().any(|b| (0..3).all(|a| (origin[a] + b[a + 3]).min(max[a]) - (origin[a] + b[a]).max(min[a]) > EPS))
         })
     }
 
@@ -1479,7 +1487,7 @@ impl Game {
         if (cursor.0 - 0.5).abs() >= 1.0000001 || (cursor.1 - 0.5).abs() >= 1.0000001 || (cursor.2 - 0.5).abs() >= 1.0000001 {
             return; // "Location too far away from hit block"
         }
-        // kierunki: 0 DOWN,1 UP,2 NORTH(-z),3 SOUTH(+z),4 WEST(-x),5 EAST(+x)
+        // directions: 0 DOWN, 1 UP, 2 NORTH (-z), 3 SOUTH (+z), 4 WEST (-x), 5 EAST (+x)
         let (dx, dy, dz) = match face {
             0 => (0, -1, 0),
             1 => (0, 1, 0),
@@ -1499,17 +1507,29 @@ impl Game {
             if !awaiting && self.may_interact(x, z) && gm != 3 && gm != 2 {
                 let slot = if hand == 0 { 36 + self.players[&session].selected as usize } else { 45 };
                 let held = self.players[&session].inventory.get(slot).copied().flatten();
-                let target_block = self.world.get_block(px, py, pz);
-                let target_air = self.world.palette.is_air(target_block);
-                if let (Some((item_id, _)), true) = (held, target_air && py < max_h && py >= self.world.dim.min_y) {
-                    // item -> block with the same name; default state (getStateForPlacement: M7)
-                    let name = self.data.registries.get("minecraft:item").and_then(|r| r.names.get(item_id as usize)).cloned();
-                    if let Some(state) = name.and_then(|n| self.data.blocks.default_state(&n)) {
-                        if !self.block_intersects_player(px, py, pz) && self.set_block_tracked(px, py, pz, state as u16).is_some() && gm == 0 {
-                            // survival: consume one item from the hand
-                            let p = self.players.get_mut(&session).unwrap();
-                            if let Some((id, c)) = p.inventory[slot] {
-                                p.inventory[slot] = if c > 1 { Some((id, c - 1)) } else { None };
+                if let Some((item_id, _)) = held {
+                    // BlockItem.place: only items that place a block; the block's default state until getStateForPlacement (M7)
+                    let block_name = self.data.item_props.get(item_id).and_then(|i| i.block.clone());
+                    let state = block_name.as_deref().and_then(|n| self.data.blocks.default_state(n));
+                    if let (Some(state), Some(block_name)) = (state, block_name) {
+                        // BlockPlaceContext: a replaceable clicked block (grass, snow, water, ...) is replaced in place, unless the
+                        // held item is that very block; otherwise the block goes to the adjacent position, which must be replaceable
+                        let replaceable = |s: &mut Self, bx: i32, by: i32, bz: i32| -> bool {
+                            let st = s.world.get_block(bx, by, bz) as u32;
+                            let Some(props) = s.data.block_props.state(st) else { return false };
+                            props.has(mc_data::props::flag::REPLACEABLE)
+                                && s.data.blocks.block_of_state(st).is_none_or(|b| b.name != block_name)
+                        };
+                        let replace_clicked = replaceable(self, x, y, z);
+                        let (tx, ty, tz) = if replace_clicked { (x, y, z) } else { (px, py, pz) };
+                        let in_world = ty < max_h && ty >= self.world.dim.min_y;
+                        if in_world && (replace_clicked || replaceable(self, tx, ty, tz)) && !self.placement_obstructed(tx, ty, tz, state) {
+                            if self.set_block_tracked(tx, ty, tz, state as u16).is_some() && gm == 0 {
+                                // survival: consume one item from the hand
+                                let p = self.players.get_mut(&session).unwrap();
+                                if let Some((id, c)) = p.inventory[slot] {
+                                    p.inventory[slot] = if c > 1 { Some((id, c - 1)) } else { None };
+                                }
                             }
                         }
                     }

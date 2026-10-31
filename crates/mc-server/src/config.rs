@@ -1,0 +1,209 @@
+//! `server.properties` — te same klucze i wartości domyślne co vanilla 1.21.1
+//! (domyślny plik wygenerowany przez oryginalny serwer przy pierwszym uruchomieniu).
+
+use anyhow::Result;
+use std::collections::BTreeMap;
+use std::path::Path;
+
+/// Domyślne wartości dokładnie jak w vanilla (kolejność alfabetyczna jak `java.util.Properties`).
+const DEFAULTS: &[(&str, &str)] = &[
+    ("accepts-transfers", "false"),
+    ("allow-flight", "false"),
+    ("allow-nether", "true"),
+    ("broadcast-console-to-ops", "true"),
+    ("broadcast-rcon-to-ops", "true"),
+    ("bug-report-link", ""),
+    ("difficulty", "easy"),
+    ("enable-command-block", "false"),
+    ("enable-jmx-monitoring", "false"),
+    ("enable-query", "false"),
+    ("enable-rcon", "false"),
+    ("enable-status", "true"),
+    ("enforce-secure-profile", "true"),
+    ("enforce-whitelist", "false"),
+    ("entity-broadcast-range-percentage", "100"),
+    ("force-gamemode", "false"),
+    ("function-permission-level", "2"),
+    ("gamemode", "survival"),
+    ("generate-structures", "true"),
+    ("generator-settings", "{}"),
+    ("hardcore", "false"),
+    ("hide-online-players", "false"),
+    ("initial-disabled-packs", ""),
+    ("initial-enabled-packs", "vanilla"),
+    ("level-name", "world"),
+    ("level-seed", ""),
+    ("level-type", "minecraft\\:normal"),
+    ("log-ips", "true"),
+    ("max-chained-neighbor-updates", "1000000"),
+    ("max-players", "20"),
+    ("max-tick-time", "60000"),
+    ("max-world-size", "29999984"),
+    ("motd", "A Minecraft Server"),
+    ("network-compression-threshold", "256"),
+    ("online-mode", "true"),
+    ("op-permission-level", "4"),
+    ("player-idle-timeout", "0"),
+    ("prevent-proxy-connections", "false"),
+    ("pvp", "true"),
+    ("query.port", "25565"),
+    ("rate-limit", "0"),
+    ("rcon.password", ""),
+    ("rcon.port", "25575"),
+    ("region-file-compression", "deflate"),
+    ("require-resource-pack", "false"),
+    ("resource-pack", ""),
+    ("resource-pack-id", ""),
+    ("resource-pack-prompt", ""),
+    ("resource-pack-sha1", ""),
+    ("server-ip", ""),
+    ("server-port", "25565"),
+    ("simulation-distance", "10"),
+    ("spawn-animals", "true"),
+    ("spawn-monsters", "true"),
+    ("spawn-npcs", "true"),
+    ("spawn-protection", "16"),
+    ("sync-chunk-writes", "true"),
+    ("text-filtering-config", ""),
+    ("use-native-transport", "true"),
+    ("view-distance", "10"),
+    ("white-list", "false"),
+];
+
+#[derive(Debug, Clone)]
+pub struct Properties {
+    map: BTreeMap<String, String>,
+}
+
+impl Properties {
+    /// Wczytuje plik; brakujące klucze uzupełnia domyślnymi i zapisuje plik (jak vanilla).
+    pub fn load_or_create(path: &Path) -> Result<Self> {
+        let mut map: BTreeMap<String, String> = DEFAULTS.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let existed = path.exists();
+        if existed {
+            for line in std::fs::read_to_string(path)?.lines() {
+                let line = line.trim_start();
+                if line.is_empty() || line.starts_with('#') || line.starts_with('!') {
+                    continue;
+                }
+                if let Some((k, v)) = line.split_once('=') {
+                    map.insert(k.trim().to_owned(), unescape(v.trim_start()));
+                }
+            }
+        }
+        let p = Self { map };
+        if !existed {
+            p.save(path)?;
+        }
+        Ok(p)
+    }
+
+    pub fn save(&self, path: &Path) -> Result<()> {
+        let mut out = String::from("#Minecraft server properties\n");
+        out.push_str(&format!("#{}\n", chrono_like_now()));
+        for (k, v) in &self.map {
+            out.push_str(&format!("{}={}\n", k, escape(v)));
+        }
+        std::fs::write(path, out)?;
+        Ok(())
+    }
+
+    pub fn str(&self, k: &str) -> &str {
+        self.map.get(k).map(String::as_str).unwrap_or("")
+    }
+    pub fn int(&self, k: &str, default: i64) -> i64 {
+        self.str(k).trim().parse().unwrap_or(default)
+    }
+    pub fn bool(&self, k: &str, default: bool) -> bool {
+        match self.str(k).trim().to_ascii_lowercase().as_str() {
+            "true" => true,
+            "false" => false,
+            _ => default,
+        }
+    }
+}
+
+/// `Properties.store` ucieka `:` i `=` w wartościach (np. `minecraft\:normal`).
+fn escape(v: &str) -> String {
+    v.replace('\\', "\\\\").replace(':', "\\:").replace('=', "\\=")
+}
+fn unescape(v: &str) -> String {
+    let mut out = String::with_capacity(v.len());
+    let mut it = v.chars();
+    while let Some(c) = it.next() {
+        if c == '\\' {
+            if let Some(n) = it.next() {
+                out.push(n);
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn chrono_like_now() -> String {
+    // Bez zależności od chrono: sama data nie ma znaczenia semantycznego.
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    format!("unix-time {secs}")
+}
+
+/// Zwraca skonfigurowane ustawienia w wygodnej, otypowanej formie.
+/// Część pól (świat, seed) zostanie użyta przy generatorze świata / wczytywaniu Anvil.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct Settings {
+    pub ip: String,
+    pub port: u16,
+    pub motd: String,
+    pub max_players: i32,
+    pub online_mode: bool,
+    pub compression_threshold: i32,
+    pub view_distance: i32,
+    pub simulation_distance: i32,
+    pub level_name: String,
+    pub level_seed: String,
+    pub level_type: String,
+    pub game_mode: u8,
+    pub difficulty: u8,
+    pub hardcore: bool,
+    pub enforce_secure_profile: bool,
+    pub enable_status: bool,
+    pub hide_online_players: bool,
+}
+
+impl Settings {
+    pub fn from(p: &Properties) -> Self {
+        let gm = match p.str("gamemode").trim().to_ascii_lowercase().as_str() {
+            "creative" | "1" => 1,
+            "adventure" | "2" => 2,
+            "spectator" | "3" => 3,
+            _ => 0,
+        };
+        let diff = match p.str("difficulty").trim().to_ascii_lowercase().as_str() {
+            "peaceful" | "0" => 0,
+            "easy" | "1" => 1,
+            "hard" | "3" => 3,
+            _ => 2, // normal
+        };
+        Self {
+            ip: p.str("server-ip").to_owned(),
+            port: p.int("server-port", 25565) as u16,
+            motd: p.str("motd").to_owned(),
+            max_players: p.int("max-players", 20) as i32,
+            online_mode: p.bool("online-mode", true),
+            compression_threshold: p.int("network-compression-threshold", 256) as i32,
+            view_distance: (p.int("view-distance", 10) as i32).clamp(3, 32),
+            simulation_distance: (p.int("simulation-distance", 10) as i32).clamp(3, 32),
+            level_name: p.str("level-name").to_owned(),
+            level_seed: p.str("level-seed").to_owned(),
+            level_type: p.str("level-type").to_owned(),
+            game_mode: gm,
+            difficulty: diff,
+            hardcore: p.bool("hardcore", false),
+            enforce_secure_profile: p.bool("enforce-secure-profile", true),
+            enable_status: p.bool("enable-status", true),
+            hide_online_players: p.bool("hide-online-players", false),
+        }
+    }
+}
